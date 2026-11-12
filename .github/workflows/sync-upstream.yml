@@ -1,0 +1,112 @@
+# Fork only: keeps this fork's `main` (upstream's `main` plus our fixes, each
+# also sent upstream as a pull request) merged with johannesjo/parallel-code.
+# A clean merge is pushed; a conflict pushes nothing and opens an issue (or
+# updates the open one) that lists the conflicting files. The nixy flake
+# builds Parallel Code from this branch and moves its pin daily.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+
+env:
+  UPSTREAM: https://github.com/johannesjo/parallel-code.git
+  ISSUE_TITLE: 'Upstream sync needs a hand'
+
+jobs:
+  sync:
+    if: github.repository != 'johannesjo/parallel-code'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch "$UPSTREAM" main
+          upstream=$(git rev-parse FETCH_HEAD)
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo "Already up to date with upstream ${upstream:0:8}."
+            echo "result=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git merge --no-edit -m "Merge upstream main (${upstream:0:8}) into main" "$upstream"; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push
+        id: push
+        if: steps.merge.outputs.result == 'merged'
+        run: |
+          if git push origin HEAD:main 2> "$RUNNER_TEMP/push.txt"; then
+            cat "$RUNNER_TEMP/push.txt"
+            echo "result=pushed" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/push.txt"
+            echo "result=refused" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The issue is the only trace a failed sync leaves: a scheduled run's red
+      # cross reaches nobody.
+      - name: Report a sync that needs a hand
+        if: steps.merge.outputs.result == 'conflict' || steps.push.outputs.result == 'refused'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Upstream \`main\` at ${UPSTREAM_SHA:0:8} could not be merged into \`main\` ([run]($RUN_URL)); nothing was pushed."
+            echo
+            if [ -s "$RUNNER_TEMP/conflicts.txt" ]; then
+              echo 'Conflicting files:'
+              echo
+              sed 's/.*/- `&`/' "$RUNNER_TEMP/conflicts.txt"
+              echo
+              echo 'Resolve it in a worktree of `gnutix/main`: merge `origin/main`, fix the files, push `HEAD:main`. A conflict with one of our fixes usually means its pull request needs a rebase too.'
+            else
+              echo 'The merge was clean but the push was refused:'
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/push.txt"
+              echo '```'
+              echo
+              echo 'GITHUB_TOKEN may not push a change to `.github/workflows/`. Push the merge from a checkout instead, or use "Sync fork" on the repository page.'
+            fi
+          } > "$body"
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$ISSUE_TITLE\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body-file "$body"
+          fi
+          exit 1
+
+      - name: Close the issue once a sync goes through
+        if: steps.merge.outputs.result == 'current' || steps.push.outputs.result == 'pushed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$ISSUE_TITLE\" in:title" --json number --jq '.[].number' |
+            while read -r number; do
+              gh issue close "$number" --repo "$GITHUB_REPOSITORY" --comment 'Upstream merged into `main`.'
+            done

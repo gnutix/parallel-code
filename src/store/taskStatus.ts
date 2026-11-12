@@ -17,6 +17,7 @@ import {
 import { warn as logWarn, info as logInfo, errMessage } from '../lib/log';
 import { adoptTaskBranch } from './task-branch';
 import { forgetPrintedPrLink, notePrintedPrLink } from './printed-pr-links';
+import { getTaskKeptWarmAt, isKeepWarmPingInFlight, isKeepWarmTurnAt } from './keep-warm-flight';
 import {
   clearAgentHookStatus,
   formatAgentHookTooltip,
@@ -1035,6 +1036,12 @@ export function markAgentOutput(agentId: string, data: Uint8Array, taskId?: stri
   resetIdleTimer(agentId);
 }
 
+/** When the agent's terminal last printed something other than housekeeping;
+ *  unknown until its terminal is mounted and prints. Reactive. */
+export function getAgentLastOutputAt(agentId: string): number | undefined {
+  return lastOutputAt[agentId];
+}
+
 /** Return the last ~4096 chars of raw PTY output for `agentId`. */
 export function getAgentOutputTail(agentId: string): string {
   return agentStates.get(agentId)?.outputTailBuffer ?? '';
@@ -1118,7 +1125,11 @@ function hasTaskAgentError(taskId: string): boolean {
     // Waiting to be resumed is not a failure, though it shares `exited` with one.
     if (isAgentSuspended(agent)) return false;
     if (agent && isAgentChat(task, id)) return !!agent.chatState?.error;
-    if (agent?.status === 'running') return getAgentHookStatus(id)?.event === 'StopFailure';
+    if (agent?.status === 'running') {
+      const hook = getAgentHookStatus(id);
+      // A failed keep-warm ping is the keep-warm's to handle, not the user's.
+      return hook?.event === 'StopFailure' && !isKeepWarmTurnAt(id, hook.since);
+    }
     if (agent?.status !== 'exited') return false;
     return agent.exitCode !== 0 || agent.signal !== null;
   });
@@ -1127,7 +1138,7 @@ function hasTaskAgentError(taskId: string): boolean {
 /** Hook state wins when present: a self-reported turn in flight is not a question,
  *  however much the screen looks like one. Only once the turn has ended do the
  *  heuristics get a say — login and trust prompts arrive with no hook at all. */
-function isAgentBlockedOnInput(agentId: string): boolean {
+export function isAgentBlockedOnInput(agentId: string): boolean {
   const agent = store.agents[agentId];
   if (agent && isAgentChat(store.tasks[agent.taskId], agentId))
     return !!agent.chatState?.requests.length;
@@ -1138,7 +1149,7 @@ function isAgentBlockedOnInput(agentId: string): boolean {
 }
 
 /** Hooks run for Claude only when its command is `claude` (main's `isClaudeCommand`). */
-function isClaudeAgent(agentId: string): boolean {
+export function isClaudeAgent(agentId: string): boolean {
   return store.agents?.[agentId]?.def?.command?.split(/[\\/]/).pop() === 'claude';
 }
 
@@ -1176,6 +1187,13 @@ function isAgentWorking(agentId: string, active: ReadonlySet<string>): boolean {
     return agent.chatState?.status === 'working' || agent.chatState?.status === 'starting';
   const hook = getAgentHookStatus(agentId);
   return hook ? isHookWorking(agentId, hook, active) : active.has(agentId);
+}
+
+/** A keep-warm ping's turn is no work of the user's: task status, the Board,
+ *  notifications and briefs all read the task as still idle. Its agent alone
+ *  shows the turn, so nothing else is typed into it meanwhile. */
+function isAgentVisiblyWorking(agentId: string, active: ReadonlySet<string>): boolean {
+  return isAgentWorking(agentId, active) && !isKeepWarmPingInFlight(agentId);
 }
 
 /** Between turns with nothing asked of the user, by the same hook-first
@@ -1216,7 +1234,7 @@ export function isTaskTerminalAsking(taskId: string): boolean {
 export function isTaskWorking(taskId: string): boolean {
   const active = activeAgents();
   // eslint-disable-next-line solid/reactivity -- runs synchronously here, so the caller tracks its reads
-  return hasRunningAgentActivity(taskId, (id) => isAgentWorking(id, active));
+  return hasRunningAgentActivity(taskId, (id) => isAgentVisiblyWorking(id, active));
 }
 
 export function getTaskAttentionState(taskId: string): TaskAttentionState {
@@ -1244,6 +1262,14 @@ export function getTaskAttentionState(taskId: string): TaskAttentionState {
 
 /** Attention is an aggregate; name the pane supplying its activity evidence. */
 export function getTaskActivityTooltip(taskId: string): string {
+  const keptWarmAt = getTaskKeptWarmAt(taskId);
+  const evidence = taskActivityEvidence(taskId);
+  if (keptWarmAt === undefined) return evidence;
+  const at = new Date(keptWarmAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${evidence}\nPrompt cache kept warm ${at}`;
+}
+
+function taskActivityEvidence(taskId: string): string {
   const task = store.tasks[taskId];
   if (!task) return 'Activity evidence unavailable';
   const ids = task.agentIds;
@@ -1294,7 +1320,7 @@ export function getTaskDotStatus(taskId: string): TaskDotStatus {
   // Shell panes are deliberately excluded: `busy` reads as "the agent is doing
   // something", which a terminal running a dev server is not.
   // eslint-disable-next-line solid/reactivity -- runs synchronously here, so the caller tracks its reads
-  if (hasRunningAgentActivity(taskId, (id) => isAgentWorking(id, active))) return 'busy';
+  if (hasRunningAgentActivity(taskId, (id) => isAgentVisiblyWorking(id, active))) return 'busy';
 
   if (task.needsReview) return 'review';
 

@@ -126,7 +126,19 @@ import {
   applyAgentHookEvent,
   getAgentHookStatus,
 } from './agentHookStatus';
-import { getTaskActivityTooltip, isTaskTerminalAsking } from './taskStatus';
+import {
+  getTaskActivityTooltip,
+  isTaskTerminalAsking,
+  isTaskWorking,
+  markAgentBusy,
+} from './taskStatus';
+import { isTaskUnread, markTaskRead } from './agentHookStatus';
+import {
+  beginKeepWarmPing,
+  endKeepWarmPing,
+  forgetKeepWarmPing,
+  resetKeepWarmPings,
+} from './keep-warm-flight';
 import { canvasActivationInput } from './canvas-activation';
 import { activationBlocker } from '../investigation/live-activation';
 import { activityLine } from '../components/board/task-state';
@@ -2160,5 +2172,116 @@ describe('hook-reported agent status', () => {
       expect(getTaskOpenQuestion('task-1')?.agentId).toBe('agent-1');
       expect(getTaskActivityTooltip('task-1')).toContain('Waiting for input');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keep-warm pings
+// ---------------------------------------------------------------------------
+
+describe('keep-warm ping turns', () => {
+  function hook(state: 'working' | 'waiting' | 'done', event = 'UserPromptSubmit'): void {
+    applyAgentHookEvent({ agentId: 'agent-1', taskId: 'task-1', state, event, at: Date.now() });
+  }
+
+  /** What `sendPrompt` does for a keep-warm ping, plus the turn's hooks. */
+  function ping(end: 'Stop' | 'StopFailure' = 'Stop'): void {
+    beginKeepWarmPing('agent-1', 'task-1');
+    markAgentBusy('agent-1');
+    vi.advanceTimersByTime(500);
+    hook('working');
+    vi.advanceTimersByTime(2_000);
+    hook('done', end);
+  }
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-05-10T10:00:00Z'));
+    setMockTask('task-1', { agentIds: ['agent-1'] });
+    setMockAgent('agent-1', { status: 'running', def: { command: 'claude' } });
+    // The user is looking at another task.
+    mockActiveTaskId = 'task-2';
+    hook('working');
+    hook('done', 'Stop');
+    vi.advanceTimersByTime(55 * 60_000);
+  });
+
+  afterEach(() => resetKeepWarmPings());
+
+  it('leaves the task idle while its agent answers the ping', () => {
+    beginKeepWarmPing('agent-1', 'task-1');
+    markAgentBusy('agent-1');
+    hook('working');
+
+    expect(isAgentIdle('agent-1')).toBe(false);
+    expect(isTaskWorking('task-1')).toBe(false);
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+    expect(getTaskDotStatus('task-1')).toBe('waiting');
+  });
+
+  it('neither marks the task unread nor reads an unread turn', () => {
+    expect(isTaskUnread('task-1')).toBe(true);
+    ping();
+    expect(isTaskUnread('task-1')).toBe(true);
+
+    markTaskRead('task-1');
+    vi.advanceTimersByTime(55 * 60_000);
+    ping();
+    expect(isTaskUnread('task-1')).toBe(false);
+  });
+
+  it("keeps the agent's last real reply, not the ping's ok", () => {
+    applyAgentHookEvent({
+      agentId: 'agent-1',
+      taskId: 'task-1',
+      state: 'done',
+      event: 'Stop',
+      lastAssistantMessage: 'Fixed the flaky test.',
+      at: Date.now(),
+    });
+    beginKeepWarmPing('agent-1', 'task-1');
+    markAgentBusy('agent-1');
+    hook('working');
+    expect(getAgentHookStatus('agent-1')?.lastAssistantMessage).toBe('Fixed the flaky test.');
+    applyAgentHookEvent({
+      agentId: 'agent-1',
+      taskId: 'task-1',
+      state: 'done',
+      event: 'Stop',
+      lastAssistantMessage: 'ok',
+      at: Date.now(),
+    });
+    expect(getAgentHookStatus('agent-1')?.lastAssistantMessage).toBe('Fixed the flaky test.');
+  });
+
+  it('keeps a failed ping out of the task status', () => {
+    ping('StopFailure');
+    endKeepWarmPing('agent-1');
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+  });
+
+  it('says when the conversation was last kept warm, once the ping is over', () => {
+    beginKeepWarmPing('agent-1', 'task-1');
+    expect(getTaskActivityTooltip('task-1')).not.toContain('kept warm');
+    endKeepWarmPing('agent-1');
+    expect(getTaskActivityTooltip('task-1')).toContain('Prompt cache kept warm');
+  });
+
+  it('shows the next real turn as usual', () => {
+    ping();
+    endKeepWarmPing('agent-1');
+    // A prompt or typing forgets the ping (sendPrompt, the terminal's onData).
+    forgetKeepWarmPing('agent-1');
+    vi.advanceTimersByTime(60_000);
+    hook('working');
+    expect(getTaskAttentionState('task-1')).toBe('active');
+    hook('done', 'Stop');
+    expect(isTaskUnread('task-1')).toBe(true);
+  });
+
+  it('still shows a question the ping raises', () => {
+    beginKeepWarmPing('agent-1', 'task-1');
+    markAgentBusy('agent-1');
+    hook('waiting', 'PermissionRequest');
+    expect(getTaskAttentionState('task-1')).toBe('needs_input');
   });
 });

@@ -667,6 +667,9 @@ export interface PersistedState {
   documentFullWidth?: boolean;
   coordinatorNotificationDelayMs?: number;
   maxIndependentTasksPerCreator?: number;
+  keepWarmEnabled?: boolean;
+  keepWarmIntervalMinutes?: number;
+  keepWarmMaxHours?: number;
   coordinatorControlHintDismissed?: boolean;
   preferUiMode?: boolean;
   disableClaudeUiMode?: boolean;
@@ -891,6 +894,12 @@ export interface AppStore {
   coordinatorNotificationDelayMs: number;
   /** How many independent tasks one task may keep open at once. */
   maxIndependentTasksPerCreator: number;
+  /** Ping idle Claude Code conversations so their prompt cache stays warm (`keep-warm.ts`). */
+  keepWarmEnabled: boolean;
+  /** Idle minutes before a ping; under the cache's 60. */
+  keepWarmIntervalMinutes: number;
+  /** Hours of pings after real activity before the task is left to go cold. */
+  keepWarmMaxHours: number;
   coordinatorControlHintDismissed: boolean;
   preferUiMode: boolean;
   /** Keep Claude Code out of the chat view; its tasks run in the terminal only. */

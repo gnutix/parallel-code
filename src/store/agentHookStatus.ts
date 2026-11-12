@@ -17,6 +17,7 @@ import { invoke } from '../lib/ipc';
 import { errMessage, warn } from '../lib/log';
 import { store } from './core';
 import { applyTaskPlanEvent } from './task-plan';
+import { isKeepWarmPingInFlight, isKeepWarmTurnAt } from './keep-warm-flight';
 
 /**
  * Status an agent reported about itself through Claude Code or Codex hooks. Unlike the
@@ -187,13 +188,19 @@ function setHookStatus(event: AgentHookEventPayload, status: ReducedAgentHookSta
   // A reported interrupt ends the turn like an inferred one, so its stragglers are dropped too.
   if (event.event === 'Interrupt')
     suppressToolEventsUntil.set(event.agentId, event.at + INTERRUPT_SUPPRESS_MS);
+  const pingTurn = isKeepWarmTurnAt(event.agentId, event.at);
   setStatus(event.agentId, {
     ...status,
+    // Its "ok" is not what the agent last said to the user.
+    ...(pingTurn ? { lastAssistantMessage: prev?.lastAssistantMessage } : {}),
     launchId: event.launchId ?? prev?.launchId,
     source: 'hook',
-    unread: finished
-      ? event.taskId !== store.activeTaskId
-      : sameState && event.state === 'done' && prev.unread,
+    // A keep-warm ping's turn is nothing new to read, and leaves an unread one unread.
+    unread: pingTurn
+      ? (prev?.unread ?? false)
+      : finished
+        ? event.taskId !== store.activeTaskId
+        : sameState && event.state === 'done' && prev.unread,
   });
 }
 
@@ -286,6 +293,9 @@ export function noteAgentPromptSent(agentId: string): void {
   const previous = statuses().get(agentId);
   if (previous?.state !== 'done') return;
   const now = Date.now();
+  // Sending a keep-warm ping is not reading the turn before it, nor answering it.
+  const pinged = isKeepWarmPingInFlight(agentId);
+  const unread = pinged && previous.unread;
   const sent: AgentHookStatus = {
     state: 'working',
     event: 'PromptSent',
@@ -293,7 +303,8 @@ export function noteAgentPromptSent(agentId: string): void {
     launchId: previous.launchId,
     since: now,
     updatedAt: now,
-    unread: false,
+    unread,
+    ...(pinged ? { lastAssistantMessage: previous.lastAssistantMessage } : {}),
   };
   setStatus(agentId, sent);
   clearTimer(promptTimers, agentId);
@@ -302,7 +313,7 @@ export function noteAgentPromptSent(agentId: string): void {
     setTimeout(() => {
       promptTimers.delete(agentId);
       if (statuses().get(agentId) !== sent) return;
-      setStatus(agentId, { ...previous, unread: false });
+      setStatus(agentId, { ...previous, unread });
     }, PROMPT_CONFIRM_MS),
   );
 }

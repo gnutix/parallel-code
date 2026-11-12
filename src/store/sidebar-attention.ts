@@ -136,6 +136,11 @@ function taskAttentionEntries(taskId: string): AttentionEntry[] {
   return entries;
 }
 
+/** The task shows in "Needs you". */
+export function taskNeedsYou(taskId: string): boolean {
+  return taskAttentionEntries(taskId).length > 0;
+}
+
 /** Independent unresolved reasons, including tasks in hidden projects or the background. */
 export function computeAttentionEntries(): AttentionEntry[] {
   const entries = [...new Set([...store.taskOrder, ...store.collapsedTaskOrder])].flatMap(

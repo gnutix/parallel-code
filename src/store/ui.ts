@@ -15,6 +15,7 @@ import type { PersistedWindowState, TaskViewportVisibility } from './types';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import { clampIndependentTasksPerCreator } from '../lib/coordinator-limits';
+import { clampKeepWarmIntervalMinutes, clampKeepWarmMaxHours } from './keep-warm-policy';
 import { defaultAskCodeModel, type AskCodeProvider } from '../../electron/shared/ask-code-models';
 import type { BriefModelId, TaskNameModelId } from '../../electron/shared/task-name-model';
 
@@ -304,6 +305,18 @@ export function setDefaultPropagateSkipPermissions(enabled: boolean): void {
 export function setCoordinatorNotificationDelayMs(ms: number): void {
   const clamped = Math.max(5_000, Math.min(300_000, Math.round(ms)));
   setStore('coordinatorNotificationDelayMs', clamped);
+}
+
+export function setKeepWarmEnabled(enabled: boolean): void {
+  setStore('keepWarmEnabled', enabled);
+}
+
+export function setKeepWarmIntervalMinutes(minutes: number): void {
+  setStore('keepWarmIntervalMinutes', clampKeepWarmIntervalMinutes(minutes));
+}
+
+export function setKeepWarmMaxHours(hours: number): void {
+  setStore('keepWarmMaxHours', clampKeepWarmMaxHours(hours));
 }
 
 export function setMaxIndependentTasksPerCreator(limit: number): void {

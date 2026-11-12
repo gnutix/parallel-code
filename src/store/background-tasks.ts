@@ -9,6 +9,7 @@ import { collapseTask, uncollapseTask } from './tasks';
 import { getPrChecks } from './pr-checks-state';
 import { getCoordinatorChildren, sortByProjectGroup } from './sidebar-order';
 import { getTaskOpenQuestions, isAgentIdle, type TaskOpenQuestion } from './taskStatus';
+import { isKeepWarmPingInFlight } from './keep-warm-flight';
 
 // Activity baselines are session-only. Timed snoozes are also saved on the task.
 const [backgroundTasks, setBackgroundTasks] = createSignal<ReadonlyMap<string, BackgroundTask>>(
@@ -79,15 +80,19 @@ function hookMarker(hook: AgentHookStatus | null): unknown {
 function agentActivity(agentId: string, questions: readonly TaskOpenQuestion[]): AgentActivity {
   const agent = store.agents[agentId];
   const hook = getAgentHookStatus(agentId);
+  // A keep-warm ping is sent only between turns, and its turn must not bring
+  // the task back: it reads as the idle agent it was sent to. A question it
+  // raises still does.
+  const pinged = isKeepWarmPingInFlight(agentId) && hook?.state !== 'waiting';
   return {
     process: JSON.stringify([agent?.status, agent?.chatState?.error]),
     activity: JSON.stringify([
-      isAgentIdle(agentId),
+      pinged || isAgentIdle(agentId),
       questions.find((question) => question.agentId === agentId)?.since,
-      hookMarker(hook),
+      pinged && hook ? 'done' : hookMarker(hook),
     ]),
     hooked: hook !== null,
-    claimAt: hook?.state === 'working' ? hook.updatedAt : undefined,
+    claimAt: hook?.state === 'working' && !pinged ? hook.updatedAt : undefined,
   };
 }
 

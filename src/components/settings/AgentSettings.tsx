@@ -11,7 +11,18 @@ import {
   setDisableClaudeUiMode,
   setDefaultSkipPermissions,
   setDefaultPropagateSkipPermissions,
+  setKeepWarmEnabled,
+  setKeepWarmIntervalMinutes,
+  setKeepWarmMaxHours,
 } from '../../store/store';
+import {
+  DEFAULT_KEEP_WARM_INTERVAL_MINUTES,
+  DEFAULT_KEEP_WARM_MAX_HOURS,
+  MAX_KEEP_WARM_INTERVAL_MINUTES,
+  MAX_KEEP_WARM_MAX_HOURS,
+  MIN_KEEP_WARM_INTERVAL_MINUTES,
+  MIN_KEEP_WARM_MAX_HOURS,
+} from '../../store/keep-warm-policy';
 import { CustomAgentEditor } from '../CustomAgentEditor';
 import { AgentEnvFileEditor } from '../AgentEnvFileEditor';
 import {
@@ -64,6 +75,100 @@ export function AgentSettings() {
           onChange={setDefaultSkipPermissions}
           description="Pre-tick skip-permissions for every new task. The agent will run without asking for confirmation. Only honoured when the selected agent supports it."
         />
+      </SettingsSection>
+      <SettingsSection title="Prompt cache">
+        <SettingsCheckboxRow
+          label="Keep idle conversations' prompt cache warm"
+          checked={store.keepWarmEnabled}
+          onChange={setKeepWarmEnabled}
+          align="flex-start"
+          description={
+            <>
+              Claude Code on a subscription caches a conversation for an hour. Coming back later
+              writes the whole context again, at about twice the input price; a tiny prompt within
+              the hour only reads it back, at about a tenth. When on, an open Claude Code task that
+              sat idle at its prompt for the interval below gets a prompt asking for a bare "ok",
+              unless it needs you, holds a draft, has something queued, or is driven by a
+              coordinator. Each ping still costs a cache read of the whole context, so it pays off
+              only for breaks of a few hours. It only helps within your plan's included usage: in
+              extra usage Claude Code caches for five minutes, and the pings achieve nothing.
+            </>
+          }
+        />
+        {/* Disabled rather than hidden so toggling doesn't shift the rows below. */}
+        <SettingsCard>
+          <label
+            style={{
+              display: 'flex',
+              'align-items': 'center',
+              gap: '10px',
+              opacity: store.keepWarmEnabled ? '1' : '0.6',
+            }}
+          >
+            <span style={{ 'font-size': '14px', color: theme.fg, 'white-space': 'nowrap' }}>
+              Ping after idle (minutes)
+            </span>
+            <input
+              type="number"
+              min={MIN_KEEP_WARM_INTERVAL_MINUTES}
+              max={MAX_KEEP_WARM_INTERVAL_MINUTES}
+              step="1"
+              disabled={!store.keepWarmEnabled}
+              value={store.keepWarmIntervalMinutes}
+              onChange={(e) => {
+                setKeepWarmIntervalMinutes(Number(e.currentTarget.value));
+                e.currentTarget.value = String(store.keepWarmIntervalMinutes);
+              }}
+              style={{
+                width: '80px',
+                ...settingsFieldStyle,
+                'font-size': '14px',
+                'font-family': "'JetBrains Mono', monospace",
+                'text-align': 'right',
+              }}
+            />
+          </label>
+          <span style={{ 'font-size': '12px', color: theme.fgSubtle }}>
+            Must stay under the cache's 60 minutes. Default: {DEFAULT_KEEP_WARM_INTERVAL_MINUTES}.
+          </span>
+        </SettingsCard>
+        <SettingsCard>
+          <label
+            style={{
+              display: 'flex',
+              'align-items': 'center',
+              gap: '10px',
+              opacity: store.keepWarmEnabled ? '1' : '0.6',
+            }}
+          >
+            <span style={{ 'font-size': '14px', color: theme.fg, 'white-space': 'nowrap' }}>
+              Stop after (hours)
+            </span>
+            <input
+              type="number"
+              min={MIN_KEEP_WARM_MAX_HOURS}
+              max={MAX_KEEP_WARM_MAX_HOURS}
+              step="1"
+              disabled={!store.keepWarmEnabled}
+              value={store.keepWarmMaxHours}
+              onChange={(e) => {
+                setKeepWarmMaxHours(Number(e.currentTarget.value));
+                e.currentTarget.value = String(store.keepWarmMaxHours);
+              }}
+              style={{
+                width: '80px',
+                ...settingsFieldStyle,
+                'font-size': '14px',
+                'font-family': "'JetBrains Mono', monospace",
+                'text-align': 'right',
+              }}
+            />
+          </label>
+          <span style={{ 'font-size': '12px', color: theme.fgSubtle }}>
+            A task untouched this long after its first ping is left to go cold; using it starts
+            over. Default: {DEFAULT_KEEP_WARM_MAX_HOURS}.
+          </span>
+        </SettingsCard>
       </SettingsSection>
       <SettingsSection title="Orchestration">
         <SettingsCheckboxRow

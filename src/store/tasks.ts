@@ -70,6 +70,7 @@ import {
 import { isLandedTaskState } from './landing';
 import { cleanPasteText } from '../lib/paste-text';
 import { forgetAgentPublication } from './reasoning-activity';
+import { forgetKeepWarmPing } from './keep-warm-flight';
 import { armSpCompletion, fireSpCompletion, onTaskRenamed } from './superProductivity';
 
 export function createAgentRecord(args: {
@@ -841,11 +842,15 @@ export async function sendPrompt(
     images?: ChatImage[];
     /** Cancel app-initiated delivery when its authorization changes. */
     signal?: AbortSignal;
+    /** A keep-warm ping (`keep-warm.ts`): no prompt history, no input time,
+     *  nothing that would make the task look used. Terminal agents only. */
+    keepWarm?: boolean;
   } = {},
 ): Promise<void> {
   options.signal?.throwIfAborted();
   const task = store.tasks[taskId];
   assertTaskCanReceiveInput(taskId, agentId);
+  if (!options.keepWarm) forgetKeepWarmPing(agentId);
   const promptedAgentIds = task?.promptedAgentIds ?? [];
   const hasPromptedAgent = promptedAgentIds.includes(agentId);
   const isQueuedInitialPrompt =
@@ -881,7 +886,7 @@ export async function sendPrompt(
   // MCP server instructions are not always surfaced by the CLI. Include the
   // canvas contract with the first explicit mention of a session, including resumes.
   // Check availability after waiting for startup to finish.
-  const withGuidance = !options.appPrompt && canvasGuidanceDue(agentId, text);
+  const withGuidance = !options.appPrompt && !options.keepWarm && canvasGuidanceDue(agentId, text);
   // The session the guidance is written to; a restart mid-send spawns one that never saw it.
   const guidedGeneration = store.agents[agentId]?.generation;
   if (withGuidance) effectiveText += `\n\n---\n${CANVAS_INSTRUCTIONS}`;
@@ -889,7 +894,7 @@ export async function sendPrompt(
   // don't treat the \r as part of a pasted block.  When the agent has enabled
   // bracketed paste, wrap only the prompt text; this avoids Codex's paste-burst
   // guard treating rapid synthetic keystrokes plus Enter as a paste.
-  setTaskLastInputAt(taskId);
+  if (!options.keepWarm) setTaskLastInputAt(taskId);
   const useBracketed = isAgentBracketedPasteEnabled(agentId);
   // Claude Code holds a paste with control or invisible characters instead of submitting it.
   const body = cleanPasteText(effectiveText);
@@ -902,6 +907,7 @@ export async function sendPrompt(
   await new Promise((r) => setTimeout(r, pasteDelayMs(body)));
   await writeToAgentWhenReady(taskId, agentId, '\r', options.signal);
   markAgentBusy(agentId);
+  if (options.keepWarm) return;
   // App sends bypass xterm's onData handler, which normally clears this flag on Enter.
   if (agentId === task?.agentIds[0]) setTaskTerminalInputPending(taskId, false);
   if (withGuidance) markCanvasGuided(agentId, guidedGeneration);

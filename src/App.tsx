@@ -154,6 +154,7 @@ import { startDesktopNotificationWatcher } from './store/desktopNotifications';
 import { startSuperProductivitySync, startSpOpenListener } from './store/store';
 import { isTaskBackgrounded, startBackgroundTaskWatcher } from './store/background-tasks';
 import { startTaskBriefWatcher } from './store/task-brief';
+import { startKeepWarm } from './store/keep-warm';
 import { showPlanTasks, startKanbanAutomation } from './store/kanban';
 import { startPrChecksSubscription } from './store/pr-checks';
 import { startPrBabysitWatcher } from './store/pr-babysit';
@@ -653,6 +654,7 @@ function App() {
     const stopSpOpenListener = startSpOpenListener();
     const stopBackgroundTaskWatcher = startBackgroundTaskWatcher();
     const stopTaskBriefWatcher = startTaskBriefWatcher();
+    const stopKeepWarm = startKeepWarm();
     const stopKanbanAutomation = startKanbanAutomation();
     const stopPrChecksSubscription = startPrChecksSubscription();
     const stopPrBabysitWatcher = startPrBabysitWatcher();
@@ -915,6 +917,7 @@ function App() {
       stopSpOpenListener();
       stopBackgroundTaskWatcher();
       stopTaskBriefWatcher();
+      stopKeepWarm();
       stopKanbanAutomation();
       stopPrChecksSubscription();
       stopPrBabysitWatcher();

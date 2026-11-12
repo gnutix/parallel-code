@@ -43,6 +43,12 @@ import {
   clampIndependentTasksPerCreator,
   DEFAULT_INDEPENDENT_TASKS_PER_CREATOR,
 } from '../lib/coordinator-limits';
+import {
+  clampKeepWarmIntervalMinutes,
+  clampKeepWarmMaxHours,
+  DEFAULT_KEEP_WARM_INTERVAL_MINUTES,
+  DEFAULT_KEEP_WARM_MAX_HOURS,
+} from './keep-warm-policy';
 import { MAX_PROMPT_HISTORY } from '../lib/prompt-history';
 import { isFeatureHintId } from '../lib/feature-hints';
 import { isShellLayoutMode } from '../lib/shellLayout';
@@ -619,6 +625,13 @@ export async function saveState(): Promise<void> {
       store.maxIndependentTasksPerCreator !== DEFAULT_INDEPENDENT_TASKS_PER_CREATOR
         ? store.maxIndependentTasksPerCreator
         : undefined,
+    keepWarmEnabled: store.keepWarmEnabled || undefined,
+    keepWarmIntervalMinutes:
+      store.keepWarmIntervalMinutes !== DEFAULT_KEEP_WARM_INTERVAL_MINUTES
+        ? store.keepWarmIntervalMinutes
+        : undefined,
+    keepWarmMaxHours:
+      store.keepWarmMaxHours !== DEFAULT_KEEP_WARM_MAX_HOURS ? store.keepWarmMaxHours : undefined,
     shareDockerAgentAuth: store.shareDockerAgentAuth || undefined,
     activeCustomThemeId: store.activeCustomThemeId ?? undefined,
     appearanceMode: store.appearanceMode !== 'dark' ? store.appearanceMode : undefined,
@@ -833,6 +846,9 @@ interface LegacyPersistedState {
   boardSidePanelLeft?: unknown;
   verboseLogging?: unknown;
   coordinatorNotificationDelayMs?: unknown;
+  keepWarmEnabled?: unknown;
+  keepWarmIntervalMinutes?: unknown;
+  keepWarmMaxHours?: unknown;
   maxIndependentTasksPerCreator?: unknown;
   shareDockerAgentAuth?: unknown;
   customThemes?: unknown;
@@ -1146,6 +1162,16 @@ export async function loadState(): Promise<void> {
         rawDelay <= 300_000
           ? Math.round(rawDelay)
           : 60_000;
+
+      s.keepWarmEnabled = raw.keepWarmEnabled === true;
+      s.keepWarmIntervalMinutes =
+        typeof raw.keepWarmIntervalMinutes === 'number'
+          ? clampKeepWarmIntervalMinutes(raw.keepWarmIntervalMinutes)
+          : DEFAULT_KEEP_WARM_INTERVAL_MINUTES;
+      s.keepWarmMaxHours =
+        typeof raw.keepWarmMaxHours === 'number'
+          ? clampKeepWarmMaxHours(raw.keepWarmMaxHours)
+          : DEFAULT_KEEP_WARM_MAX_HOURS;
 
       const rawIndependentLimit = raw.maxIndependentTasksPerCreator;
       s.maxIndependentTasksPerCreator = clampIndependentTasksPerCreator(

@@ -42,6 +42,7 @@ import {
 } from '../store/store';
 import { setAgentCanvasTools } from '../store/agents';
 import { clearTerminalInputPendingFromQuestion } from '../store/tasks';
+import { forgetKeepWarmPing } from '../store/keep-warm-flight';
 import { isLandedTaskState } from '../store/landing';
 import { boardCoversWorkspace, boardSidePanelOpen } from '../store/project-pages';
 import { warn as logWarn } from '../lib/log';
@@ -1143,7 +1144,11 @@ export function TerminalView(props: TerminalViewProps) {
     term.onData((data) => {
       if (!canForwardInput()) return;
       noteUserTerminalInput(data);
-      if (!props.isShell) noteAgentTerminalInput(agentId, data, screenLine);
+      if (!props.isShell) {
+        noteAgentTerminalInput(agentId, data, screenLine);
+        // Terminal reports (focus, mouse, query replies) are not the user's activity.
+        if (hasTerminalUserActivity(data)) forgetKeepWarmPing(agentId);
+      }
       if (props.onPromptDetected) {
         for (const ch of data) {
           if (ch === '\r') {

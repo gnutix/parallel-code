@@ -26,6 +26,7 @@ import {
   startBackgroundTaskWatcher,
 } from './background-tasks';
 import type { Task } from './types';
+import { beginKeepWarmPing, endKeepWarmPing, forgetKeepWarmPing } from './keep-warm-flight';
 
 vi.mock('../lib/ipc', () => ({ invoke: vi.fn(), fireAndForget: vi.fn() }));
 vi.mock('../lib/log', async (original) => ({
@@ -925,4 +926,26 @@ it('replaces a CI snooze when stopping agents for a timed snooze', async () => {
   expect(store.tasks.one.snoozedUntilCi).toBeUndefined();
   expect(isTaskSnoozedUntilCi('one')).toBe(false);
   expect(getTaskSnoozedUntil('one')).toBeDefined();
+});
+
+it('stays in the back while its agent answers a keep-warm ping', () => {
+  hook('done', 'Stop');
+  sendTaskToBack('one');
+  vi.advanceTimersByTime(55 * 60_000);
+
+  // What the keep-warm sends and the turn that answers it.
+  beginKeepWarmPing('one-agent', 'one');
+  markAgentBusy('one-agent');
+  hook('working', 'UserPromptSubmit');
+  vi.advanceTimersByTime(2_000);
+  hook('done', 'Stop');
+  vi.advanceTimersByTime(5_000);
+  endKeepWarmPing('one-agent');
+  expect(isTaskBackgrounded('one')).toBe(true);
+
+  // A real turn afterwards still brings it back.
+  forgetKeepWarmPing('one-agent');
+  vi.advanceTimersByTime(1_000);
+  hook('working', 'UserPromptSubmit');
+  expect(isTaskBackgrounded('one')).toBe(false);
 });

@@ -1,140 +1,40 @@
-<p align="center">
-  <img src="build/logo-text-squared.svg" alt="Parallel Code" height="76">
-</p>
+# gnutix's fork of Parallel Code
 
-<p align="center">
-  <strong>Ten agents.<br>
-  Ten branches.<br>
-  One afternoon.</strong>
-</p>
+This is [johannesjo/parallel-code](https://github.com/johannesjo/parallel-code) with my fixes on
+top. Its `main` is upstream's `main` plus each fix below, merged here as soon as it is done and
+sent upstream as a pull request at the same time. A workflow merges upstream's `main` into it every
+night, so it never falls behind.
 
-<p align="center">
-  Dispatch AI coding agents in parallel, each in its own worktree.<br>
-  Review the diffs, merge the wins, toss the rest.
-</p>
+For what Parallel Code is and how to install it, see
+[upstream's README](https://github.com/johannesjo/parallel-code#readme).
 
-<p align="center">
-  Works with Claude Code, Codex, OpenCode, Copilot, and Antigravity · Every change isolated in its own git worktree · Free, open source, no extra platform fee
-</p>
+## Bugs fixed
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Electron-47848F?logo=electron&logoColor=white" alt="Electron">
-  <img src="https://img.shields.io/badge/SolidJS-2C4F7C?logo=solid&logoColor=white" alt="SolidJS">
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey" alt="macOS | Linux">
-  <img src="https://img.shields.io/github/license/johannesjo/parallel-code" alt="License">
-</p>
+Newest first. The pull request link shows whether upstream has merged it yet.
 
-<p align="center">
-  <a href="https://youtu.be/sLf0tsQA3pU">
-    <img src="https://img.shields.io/badge/Watch%20Intro-YouTube-red?logo=youtube&logoColor=white&style=for-the-badge" alt="Watch intro on YouTube">
-  </a>
-</p>
+| Area      | What was wrong                                                                                                                                                                                                                       | Pull request                                                 |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Board     | With a task open beside the board, pressing the board button again did nothing. It now closes the side panel and puts focus back on the task's card.                                                                                 | [#370](https://github.com/johannesjo/parallel-code/pull/370) |
+| Finish    | A task whose work went out on another branch, leaving its own branch empty, could only be closed with the × in its title bar: Finish offered a disabled "Merge into local main" and Push. It now offers Close task.                  | [#368](https://github.com/johannesjo/parallel-code/pull/368) |
+| Terminal  | A setup script that exited 0 showed "Setup script failed (0)" and an error notification, and an agent that exited cleanly counted as failed: node-pty's signal `0` on a clean exit reached the renderer as the truthy string `"0"`.  | [#366](https://github.com/johannesjo/parallel-code/pull/366) |
+| Resources | The Resources panel left out the CPU of commands that start and exit between two samples (hooks, status-line scripts, short test runs). With a dozen agents it showed 27% of the machine while it was really at about 50%.           | [#363](https://github.com/johannesjo/parallel-code/pull/363) |
+| PR checks | A task showed no PR chip when its PR, pushed under another branch name, was merged before the app saw it open, or when the agent never printed its link.                                                                             | [#362](https://github.com/johannesjo/parallel-code/pull/362) |
+| Electron  | The app pinned Electron 42, which is end-of-life and gets no more Chromium or Node security fixes. Upgraded to 45, with terminal paste moved to the new clipboard API. _Sent upstream only, not merged into this fork's `main` yet._ | [#361](https://github.com/johannesjo/parallel-code/pull/361) |
+| Chat      | With Chat turned off in Settings, clicking the greyed-out Chat button raised a red alert under the task header that nothing cleared. A Chat button that cannot open now does nothing and shows a not-allowed cursor.                 | [#360](https://github.com/johannesjo/parallel-code/pull/360) |
+| Prompt    | The "Needs you" line was laid over the prompt box: a scrolled draft ran under it, and the text jumped 20–24 px each time it came and went. It now has its own row above the text.                                                    | [#357](https://github.com/johannesjo/parallel-code/pull/357) |
+| Usage     | In the usage popover, each meter row wrapped and shrank by a different amount, so the bars ended at different points and "72% left" broke over two lines. The meters now share one grid.                                             | [#355](https://github.com/johannesjo/parallel-code/pull/355) |
 
-<p align="center">
-  <img src="screens/longer-video.gif" alt="Parallel Code demo" width="800">
-</p>
+## Features
 
-## How it works
+Not bugs, but merged here too.
 
-1. **Start a task.** Describe it and pick an agent. Parallel Code creates a branch and a [git worktree](https://git-scm.com/docs/git-worktree), links `node_modules` and other git-ignored directories into it, and starts the agent there.
-2. **Start the next one.** The Board sorts every task by what it needs from you: Needs you, Stopped, Working, In pull request. `Ctrl+Tab` jumps to the next task that is waiting for you.
-3. **Review the diff.** Comment on lines and send the comments back to the agent, or ask for a guided tour of what changed.
-4. **Merge it or toss it.** Finish merges the branch or pushes it for a pull request. Closing a task removes its worktree.
+| Area       | What it adds                                                                                                                                                                               | Pull request                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Task panel | A pill on the boundary of the two-column task view hides the side column, giving the agent terminal the whole width, and brings it back.                                                   | [#369](https://github.com/johannesjo/parallel-code/pull/369) |
+| Agents     | An opt-in setting (Settings > Agents > Prompt cache) pings an idle Claude Code conversation every 55 minutes, so coming back to it reads the prompt cache instead of writing it all again. | This fork only                                               |
 
-That is the core loop. Everything else is optional and stays out of the way until you use it.
+## Fork-only files
 
-## Screenshots
-
-<p align="center">
-  <img src="screens/showcase-board.png" alt="Board with ten agents sorted by what they need from you" width="800"><br>
-  <em>Ten agents across Claude Code, Codex, Gemini and Copilot, sorted by what they need from you</em>
-</p>
-
-| Agents working, waiting for input, and ready to merge | One task in focus with its chat, files, notes, and shell |
-| ----------------------------------------------------- | -------------------------------------------------------- |
-| ![Overview](screens/showcase-overview.png)            | ![Focus view](screens/showcase-focus.png)                |
-| **Inline review comments you send back to the agent** | **A guided tour of what the agent changed**              |
-| ![Diff review](screens/showcase-diff-review.png)      | ![Change tour](screens/showcase-change-tour.png)         |
-| **The agent's reasoning graph, updated live**         | **A mind map with branches linked to live tasks**        |
-| ![Reasoning graph](screens/showcase-reasoning.png)    | ![Mind map](screens/showcase-mind-map.png)               |
-
-## Why Parallel Code?
-
-- **Mix the agents you already use** — [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [OpenCode](https://opencode.ai/), [Copilot CLI](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), [Antigravity CLI](https://antigravity.google/), or any other terminal agent, side by side on one board. Each runs as its own CLI, with your own login and plan.
-- **Review is built in** — a diff viewer with inline comments you send back to the agent, guided tours of the changes, and an optional second-opinion review by a separate model, so an agent never grades its own work.
-- **Every change isolated** — each task gets its own branch and worktree, and optionally its own Docker container.
-- **Free, open source, local** — MIT licensed, no account, no extra subscription. Parallel Code has no server of its own: your code goes only to the agent CLIs you run and to the models you choose in Settings.
-- **Keyboard-first** — every action has a shortcut.
-- **Check in from your phone** — scan a QR code to follow and answer your agents over Wi-Fi or Tailscale.
-
-### Where it fits
-
-| If you use…                                           | Parallel Code adds                                                                                                                                               |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Several terminals or tmux**                         | Worktrees, branches and merges handled for you, and one board that shows which agent is waiting for you                                                          |
-| **One vendor's desktop app** (Claude, Codex, Copilot) | Agents from different vendors on the same board, the same review flow for all of them, and an arena to compare them on one task                                  |
-| **Another parallel-agent app**                        | Free and MIT licensed with no paid tier, macOS and Linux, a review loop you can send back to the agent, and phone access that connects straight to your computer |
-
-**When something else fits better:** Parallel Code runs agents on your computer, so it is not for agents that keep working in the cloud while your laptop is off.
-
-## Demo
-
-<p align="center">
-  <a href="screens/showcase.mp4">
-    <img src="screens/best-video.gif" alt="Watch the demo" width="800">
-  </a>
-</p>
-
-<p align="center">
-  <em><a href="screens/showcase.mp4">▶ Watch the showcase (MP4)</a></em>
-</p>
-
-## Getting started
-
-1. **Download** the latest release from the [releases page](https://github.com/johannesjo/parallel-code/releases/latest):
-   - **macOS** — `.dmg` (universal, signed and notarized)
-   - **Linux** — `.AppImage` or `.deb`
-2. **Install at least one agent CLI** — Claude Code, Codex CLI, OpenCode, Copilot CLI or Antigravity CLI. The welcome screen shows which ones it found.
-3. **Open Parallel Code**, choose a folder with your code (a git repository works best), and start a task.
-
-<details>
-<summary><strong>Build from source</strong></summary>
-
-```sh
-git clone https://github.com/johannesjo/parallel-code.git
-cd parallel-code
-npm install
-npm run dev
-```
-
-Requires [Node.js](https://nodejs.org/) 22.12 or later. On Windows, the npm scripts use POSIX shell syntax, so run them through Git Bash: `npm config set script-shell "C:\Program Files\Git\bin\bash.exe" --location project`.
-
-Phone access uses port `8777` in development (`npm run dev`) and `7777` in the installed app, so both can run together. Run `npm run build:remote` after changing the mobile UI, then use **Connect Phone** in the development app to get its connection link or QR code.
-
-</details>
-
-## Optional features
-
-Each feature is described in [docs/features.md](docs/features.md).
-
-- **Review** — inline review comments, a guided tour of the changes, confidence ratings from a separate reviewer model, per-file test coverage, before-and-after screenshots of UI changes, and tours that explain a plan or a file
-- **Planning** — a Kanban project plan kept in `KANBAN.md`, agents that start and manage their own subtasks, an arena that runs one prompt with two to four agents to compare, a mind map and the agent's live reasoning graph, a live Markdown canvas, notes, and short task briefs
-- **Running code** — shell terminals per task, a browser preview of your local app, per-project Docker sandboxes (not for Antigravity), direct mode without a worktree, folders without git, and importing existing worktrees
-- **Phone** — a phone UI in any mobile browser, an Android app, and notifications when a task needs you. See [docs/phone.md](docs/phone.md)
-- **Integrations** — PR CI status notifications, [Super Productivity](https://super-productivity.com) time tracking (an open-source to-do list and time tracker by the same developer), and a choice of model for code Q&A
-- **Customization** — Focus, Tiles and Board layouts, configurable shortcuts, custom agents, and 10 themes
-
-Every action has a keyboard shortcut. Press `Ctrl+/` or `F1` in the app to see them all, or read the [shortcut list](docs/features.md#keyboard-shortcuts).
-
-## Contributing
-
-Found a bug or have an idea? Use **Settings → General → Report a bug** in the app, or [open an issue](https://github.com/johannesjo/parallel-code/issues/new/choose). Pull requests are welcome, including ones written with coding agents; see [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
-
----
-
-If Parallel Code saves you time, consider giving it a [star on GitHub](https://github.com/johannesjo/parallel-code). It helps others find the project.
-
-## License
-
-MIT
+- `README.md`: this file. The nightly sync keeps it when upstream changes theirs.
+- `.github/workflows/sync-upstream.yml`: the nightly merge of upstream's `main`. On a conflict it
+  pushes nothing and opens an issue listing the files.

@@ -1,4 +1,4 @@
-import { Show, type JSX } from 'solid-js';
+import { Show, batch, createSignal, type JSX } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { closeTaskNow } from './CloseTaskDialog';
@@ -57,6 +57,7 @@ vi.mock('../lib/ipc', () => ({
 }));
 vi.mock('./ConfirmDialog', () => ({
   ConfirmDialog: (props: {
+    open: boolean;
     message: JSX.Element;
     confirmLabel: string;
     confirmDisabled?: boolean;
@@ -64,7 +65,7 @@ vi.mock('./ConfirmDialog', () => ({
     footerNote?: string;
     onConfirm: () => void;
   }) => (
-    <div>
+    <div data-testid="finish" hidden={!props.open}>
       {props.message}
       {props.extraActions}
       <span data-testid="footer-note">{props.footerNote}</span>
@@ -90,6 +91,28 @@ const refreshCodeFingerprint = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 vi.mock('../store/task-brief', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../store/task-brief')>()),
   refreshCodeFingerprint,
+}));
+// Covered by its own tests; here only whether it shows and how it hands back.
+vi.mock('./CreatePrDialog', () => ({
+  CreatePrDialog: (props: {
+    open: boolean;
+    backLabel: string;
+    onClose: () => void;
+    onCreated: (created: { url: string; existed: boolean; draft: boolean }) => void;
+  }) => (
+    <Show when={props.open}>
+      <div data-testid="create-pr">
+        <button onClick={() => props.onClose()}>{props.backLabel}</button>
+        <button
+          onClick={() =>
+            props.onCreated({ url: 'https://github.com/o/r/pull/7', existed: false, draft: false })
+          }
+        >
+          Create PR
+        </button>
+      </div>
+    </Show>
+  ),
 }));
 vi.mock('./ChangedFilesList', () => ({ ChangedFilesList: () => null }));
 // Covered by its own tests; its store imports reach past this file's mocks.
@@ -197,6 +220,13 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const confirmButton = () => document.querySelector<HTMLButtonElement>('[data-testid="confirm"]');
 const button = (text: string) =>
   [...document.querySelectorAll('button')].find((candidate) => candidate.textContent === text);
+/** Picks how "Update branch" brings the base in, from its chevron menu. */
+const pickUpdateRoute = (label: string) => {
+  document.querySelector<HTMLButtonElement>('[aria-label="Update branch by"]')?.click();
+  [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((row) => row.textContent === label)
+    ?.click();
+};
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -230,7 +260,12 @@ const reported = () =>
   task({ verification: { checks: [{ name: 'Tests', command: 'npm test', result: 'passed' }] } });
 
 function mount(
-  options: { task?: Task; tour?: ChangeTourController; initialCleanup?: boolean } = {},
+  options: {
+    task?: Task;
+    tour?: ChangeTourController;
+    initialCleanup?: boolean;
+    initialCreatePr?: boolean;
+  } = {},
 ) {
   const handlers = {
     onClose: vi.fn(),
@@ -246,7 +281,7 @@ function mount(
         open
         task={options.task ?? task()}
         initialCleanup={options.initialCleanup ?? true}
-        initialCreatePr={false}
+        initialCreatePr={options.initialCreatePr ?? false}
         tour={options.tour ?? tour()}
         onTourClick={() => {}}
         onPushStart={() => {}}
@@ -351,6 +386,97 @@ describe('FinishDialog merge', () => {
       'parent',
       expect.objectContaining({ squash: true, message: `feat: thing\n\n${body?.value}` }),
     );
+  });
+});
+
+describe('FinishDialog opened for Create PR', () => {
+  const button = (name: string) =>
+    [...document.querySelectorAll('button')].find((b) => b.textContent === name);
+  const finish = () => document.querySelector<HTMLElement>('[data-testid="finish"]');
+  const finishHidden = () => finish()?.hidden;
+
+  it('shows only Create pull request, and cancelling it closes everything', () => {
+    const handlers = mount({ initialCreatePr: true });
+    expect(document.querySelector('[data-testid="create-pr"]')).not.toBeNull();
+    expect(finishHidden()).toBe(true);
+    button('Cancel')?.click();
+    expect(handlers.onClose).toHaveBeenCalled();
+  });
+
+  it('closes everything once the PR is created', () => {
+    const handlers = mount({ initialCreatePr: true });
+    button('Create PR')?.click();
+    expect(showNotification).toHaveBeenCalledWith('Created pull request #7', expect.anything());
+    expect(handlers.onClose).toHaveBeenCalled();
+  });
+
+  it('opens Finish alone otherwise', () => {
+    mount();
+    expect(finishHidden()).toBe(false);
+    expect(document.querySelector('[data-testid="create-pr"]')).toBeNull();
+  });
+
+  // Reopens the same dialog in another mode, as TaskPanel does.
+  function mountSwitchable(initialCreatePr: boolean) {
+    const [open, setOpen] = createSignal(true);
+    const [createPr, setCreatePr] = createSignal(initialCreatePr);
+    dispose = render(
+      () => (
+        <FinishDialog
+          open={open()}
+          task={task()}
+          initialCleanup
+          initialCreatePr={createPr()}
+          tour={tour()}
+          onTourClick={() => {}}
+          onPushStart={() => {}}
+          onDiffFileClick={() => {}}
+          onClose={() => setOpen(false)}
+          onCloseTask={() => {}}
+          onOpenPullRequest={() => {}}
+          onPushDone={() => {}}
+          onRegenerateTour={() => {}}
+          onConfigureChecks={() => {}}
+        />
+      ),
+      document.body,
+    );
+    // Opened again the way TaskPanel does it: mode and open in one batch.
+    const reopen = (asCreatePr: boolean) =>
+      batch(() => {
+        setCreatePr(asCreatePr);
+        setOpen(true);
+      });
+    return { open, setOpen, reopen };
+  }
+
+  it('never shows Finish when reopened for Create PR after a plain Finish', () => {
+    const { setOpen, reopen } = mountSwitchable(false);
+    setOpen(false);
+    // Any toggle of `hidden` means Finish was shown for a render before hiding again.
+    const observer = new MutationObserver(() => {});
+    observer.observe(document.body, { attributeFilter: ['hidden'], subtree: true });
+    reopen(true);
+    const toggles = observer.takeRecords().filter((r) => r.target === finish());
+    observer.disconnect();
+    expect(finishHidden()).toBe(true);
+    expect(toggles).toEqual([]);
+  });
+
+  it('never shows Create PR when reopened as Finish after cancelling Create PR alone', () => {
+    const { open, reopen } = mountSwitchable(true);
+    button('Cancel')?.click();
+    expect(open()).toBe(false);
+    const observer = new MutationObserver(() => {});
+    observer.observe(document.body, { childList: true, subtree: true });
+    reopen(false);
+    const mounted = observer
+      .takeRecords()
+      .flatMap((r) => [...r.addedNodes])
+      .some((n) => n instanceof HTMLElement && n.dataset.testid === 'create-pr');
+    observer.disconnect();
+    expect(mounted).toBe(false);
+    expect(finishHidden()).toBe(false);
   });
 });
 
@@ -468,9 +594,10 @@ describe('FinishDialog base sync', () => {
     expect(document.body.textContent).toContain(
       "They also change 1 of this branch's files: src/a.ts. Test again afterwards.",
     );
-    expect(button('Rebase')).toBeDefined();
+    expect(button('Update branch')).toBeDefined();
     expect(confirmButton()?.textContent).toBe('Merge into local main');
-    button('Merge')?.click();
+    pickUpdateRoute('Merge commit');
+    button('Update branch')?.click();
     expect(invoke).toHaveBeenCalledWith(IPC.MergeBaseIntoTask, {
       worktreePath: '/repo/.worktrees/parent',
       baseBranch: 'main',
@@ -493,9 +620,7 @@ describe('FinishDialog base sync', () => {
     });
     mount({ task: task({ baseBranch: 'main' }) });
     await flush();
-    expect(document.body.textContent).toContain(
-      "main has 1 new commit. No overlap with this branch's files.",
-    );
+    expect(document.body.textContent).toContain('main has 1 new commit · no overlap');
   });
 
   it('claims no overlap when the merge check could not tell', async () => {
@@ -506,8 +631,34 @@ describe('FinishDialog base sync', () => {
     });
     mount({ task: task({ baseBranch: 'main' }) });
     await flush();
-    expect(document.body.textContent).toContain('main has 1 new commit.');
-    expect(document.body.textContent).not.toContain('No overlap');
+    expect(document.body.textContent).toContain('main has 1 new commit');
+    expect(document.body.textContent).not.toContain('no overlap');
+  });
+
+  it('offers no base sync when the branch has nothing to merge', async () => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 4 };
+      return { current_branch: 'task/parent', has_committed_changes: false };
+    });
+    mount({ task: task({ baseBranch: 'main' }) });
+    await flush();
+    expect(document.body.textContent).toContain('Nothing on this branch');
+    expect(document.body.textContent).not.toContain('new commits');
+    expect(button('Update branch')).toBeUndefined();
+  });
+
+  it('offers no base sync once the branch already landed in the base', async () => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus)
+        return { conflicting_files: [], main_ahead_count: 2, already_landed: true };
+      return { current_branch: 'task/parent', has_committed_changes: true };
+    });
+    mount({ task: task({ baseBranch: 'main' }) });
+    await flush();
+    expect(document.body.textContent).toContain('nothing is left to merge');
+    expect(document.body.textContent).not.toContain('new commits');
   });
 
   it('brings the base in over uncommitted changes the base does not touch', async () => {
@@ -522,8 +673,7 @@ describe('FinishDialog base sync', () => {
     });
     mount({ task: task({ baseBranch: 'main' }) });
     await flush();
-    expect(button('Rebase')?.disabled).toBe(false);
-    expect(button('Merge')?.disabled).toBe(false);
+    expect(button('Update branch')?.disabled).toBe(false);
   });
 
   it('asks to commit uncommitted changes the base changed too', async () => {
@@ -584,6 +734,26 @@ describe('FinishDialog base sync', () => {
     );
   });
 
+  it('updates the branch through the agent once picked from the menu', async () => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 1 };
+      return { current_branch: 'task/parent', has_committed_changes: true };
+    });
+    vi.mocked(sendPrompt).mockResolvedValue(undefined);
+    store.agents = { agent: { status: 'running' } } as unknown as typeof store.agents;
+    onTestFinished(() => {
+      store.agents = {};
+    });
+    const handlers = mount({ task: task({ baseBranch: 'main', agentIds: ['agent'] }) });
+    await flush();
+    pickUpdateRoute('Rebase with AI');
+    button('Update branch')?.click();
+    expect(handlers.onClose).toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalledWith('parent', 'agent', 'rebase on main branch');
+    expect(invoke).not.toHaveBeenCalledWith(IPC.RebaseTask, expect.anything());
+  });
+
   it('offers a way out when a rebase stops on conflicts the merge check did not predict', async () => {
     mockInvoke((channel) => {
       if (channel === IPC.GetBranchLog) return '';
@@ -601,7 +771,7 @@ describe('FinishDialog base sync', () => {
     });
     mount({ task: task({ baseBranch: 'main', agentIds: ['agent'] }) });
     await flush();
-    button('Rebase')?.click();
+    button('Update branch')?.click();
     await flush();
     const text = document.body.textContent ?? '';
     expect(text).toContain(
@@ -627,7 +797,7 @@ describe('FinishDialog base sync', () => {
     });
     mount({ task: task({ baseBranch: 'main' }) });
     await flush();
-    button('Rebase')?.click();
+    button('Update branch')?.click();
     await flush();
     expect(document.body.textContent).toContain('Rebase failed: index.lock exists');
     expect(document.body.textContent).not.toContain('instead');
@@ -858,6 +1028,65 @@ describe('FinishDialog readiness tip', () => {
   });
 });
 
+describe('FinishDialog changes summary', () => {
+  const brief = (changes?: string) => ({
+    brief: { goal: 'g', now: 'n', ...(changes && { changes }) },
+    generatedAt: 100,
+    fingerprint: 'a',
+  });
+  const summary = () => document.querySelector('[data-testid="changes-summary"]');
+
+  it("says in a sentence what the branch changes, from the task's brief", async () => {
+    mount({ task: task({ brief: brief('Adds retry backoff to the webhook queue.') }) });
+    await flush();
+    expect(summary()?.textContent).toBe('Adds retry backoff to the webhook queue.');
+    // The code may have moved on since the brief; reading it tells.
+    expect(refreshCodeFingerprint).toHaveBeenCalledWith('parent');
+  });
+
+  it('marks a summary of code that changed since', async () => {
+    mount({
+      task: task({
+        brief: brief('Adds retry backoff.'),
+        codeFingerprint: { fingerprint: 'b', at: 200 },
+      }),
+    });
+    await flush();
+    expect(summary()?.textContent).toBe('Adds retry backoff. (written before the latest changes)');
+  });
+
+  it('notes that the summary may cover uncommitted changes the merge leaves out', async () => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
+      return {
+        current_branch: 'task/parent',
+        has_committed_changes: true,
+        has_uncommitted_changes: true,
+      };
+    });
+    mount({ task: task({ brief: brief('Adds retry backoff.') }) });
+    await flush();
+    expect(summary()?.textContent).toBe('Adds retry backoff. (may include uncommitted changes)');
+  });
+
+  it('shows nothing without a summary or anything to merge', async () => {
+    mount({ task: task({ brief: brief() }) });
+    await flush();
+    expect(summary()).toBeNull();
+    dispose?.();
+    document.body.replaceChildren();
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
+      return { current_branch: 'task/parent', has_committed_changes: false };
+    });
+    mount({ task: task({ brief: brief('Adds retry backoff.') }) });
+    await flush();
+    expect(summary()).toBeNull();
+  });
+});
+
 describe('FinishDialog tour', () => {
   it('offers to regenerate a ready tour', async () => {
     expect(mount().onRegenerateTour).not.toHaveBeenCalled();
@@ -1053,7 +1282,10 @@ describe('FinishDialog base sync with an open PR', () => {
     mount({ task: task({ baseBranch: 'main', prUrl: PR_URL }) });
     await flush();
     expect(document.body.textContent).toContain('main has 3 new commits');
-    expect(button('Merge')).toBeDefined();
+    // Rebasing a branch behind a PR would need a force-push.
+    button('Update branch')?.click();
+    expect(invoke).toHaveBeenCalledWith(IPC.MergeBaseIntoTask, expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith(IPC.RebaseTask, expect.anything());
   });
 
   it('leaves a moved base alone once the PR merged', async () => {
@@ -1647,6 +1879,10 @@ describe('FinishDialog base upstream', () => {
         'That is the likely cause of the conflicts in guide.md.',
     );
     expect(text()).toContain('e1ff6d7 docs: add guide');
+    // It explains the conflict, so it opens on its own.
+    expect(document.querySelector<HTMLDetailsElement>('[data-testid="base-upstream"]')?.open).toBe(
+      true,
+    );
 
     button('Reset main to origin/main…')?.click();
     await flush();
@@ -1663,5 +1899,33 @@ describe('FinishDialog base upstream', () => {
     });
     expect(document.querySelector('[data-testid="base-upstream"]')).toBeNull();
     expect(text()).toContain('Reset main to its upstream. It was at bbbbbbbbbb.');
+  });
+
+  it('keeps a diverged base folded when it explains no conflict, even with nothing to merge', async () => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus)
+        return {
+          conflicting_files: [],
+          main_ahead_count: 0,
+          base_upstream: {
+            upstream: 'origin/main',
+            head: 'b'.repeat(40),
+            behind: 3,
+            local_count: 4,
+            local_commits: [{ hash: 'e1ff6d7', subject: 'docs: add guide' }],
+            differing_files: [],
+          },
+        };
+      return { current_branch: 'task/parent', has_committed_changes: false };
+    });
+    mount({ task: task({ baseBranch: 'main' }) });
+    await flush();
+    const notice = document.querySelector<HTMLDetailsElement>('[data-testid="base-upstream"]');
+    expect(notice?.open).toBe(false);
+    expect(notice?.querySelector('summary')?.textContent).toBe(
+      'Local main has 4 commits not on origin/main and is 3 behind it.',
+    );
+    expect(button('Reset main to origin/main…')).toBeDefined();
   });
 });

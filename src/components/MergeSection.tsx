@@ -14,6 +14,7 @@ import { MergeCommitList } from './MergeCommitList';
 import { BaseUpstreamNotice } from './BaseUpstreamNotice';
 import { MergeConflictBanner } from './MergeConflictBanner';
 import type { MergeState } from './merge-state';
+import { isTourOutdated } from '../lib/finish-reports';
 
 interface MergeSectionProps {
   task: Task;
@@ -199,7 +200,15 @@ export function MergeBlockers(props: MergeSectionProps & { showBaseSync: boolean
       </Show>
       {/* Before the conflict banner: it explains conflicts that banner lists. */}
       <BaseUpstreamNotice task={props.task} state={props.state} />
-      <Show when={props.showBaseSync}>
+      {/* Bringing the base in does nothing for finishing when no merge will run. */}
+      <Show
+        when={
+          props.showBaseSync &&
+          !props.state.alreadyLanded() &&
+          // Shown while the worktree status loads, so it does not pop in afterwards.
+          (props.state.worktreeStatus.loading || props.state.hasCommittedChangesToMerge())
+        }
+      >
         <MergeConflictBanner task={props.task} state={props.state} onDone={props.onDone} />
       </Show>
       {/* Outside the conflict banner: that one hides once the base is in. */}
@@ -233,6 +242,7 @@ export function MergeChanges(props: MergeSectionProps) {
         <Show when={props.state.commitCount()}>{(count) => ` (${commitLabel(count())})`}</Show>
       </summary>
       <div style={{ 'margin-top': '8px' }}>
+        <ChangesSummary task={props.task} state={props.state} />
         <MergeCommitList state={props.state} />
         <div
           style={{
@@ -258,6 +268,42 @@ export function MergeChanges(props: MergeSectionProps) {
         </div>
       </div>
     </details>
+  );
+}
+
+/**
+ * The brief's one-sentence account of what the branch changes, so the lists
+ * below need not be read to know what merges. Left out once the status shows
+ * nothing to merge; while it loads it stays, so nothing jumps.
+ */
+function ChangesSummary(props: Pick<MergeSectionProps, 'task' | 'state'>) {
+  const shown = () =>
+    !props.state.alreadyLanded() &&
+    !(props.state.worktreeStatus() && !props.state.hasCommittedChangesToMerge());
+  return (
+    <Show when={shown() && props.task.brief}>
+      {(record) => (
+        <Show when={record().brief.changes}>
+          {(changes) => (
+            <p data-testid="changes-summary" style={{ margin: '0 0 8px', color: theme.fg }}>
+              {changes()}
+              {/* Briefs are written after agent turns; edits since are not in it. */}
+              <Show
+                when={isTourOutdated(record(), props.task)}
+                fallback={
+                  // The brief reads the working tree, which the merge leaves behind.
+                  <Show when={props.state.worktreeStatus()?.has_uncommitted_changes}>
+                    <span style={{ color: theme.fgMuted }}> (may include uncommitted changes)</span>
+                  </Show>
+                }
+              >
+                <span style={{ color: theme.fgMuted }}> (written before the latest changes)</span>
+              </Show>
+            </p>
+          )}
+        </Show>
+      )}
+    </Show>
   );
 }
 

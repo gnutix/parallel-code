@@ -641,6 +641,7 @@ export async function saveState(): Promise<void> {
     darkThemePreset: store.darkThemePreset,
     darkThemeCustomId: store.darkThemeCustomId ?? undefined,
     mcpOrchestrationEnabled: store.mcpOrchestrationEnabled,
+    allowCrossProjectReads: store.allowCrossProjectReads || undefined,
     documentWorkspacesEnabled: store.documentWorkspacesEnabled || undefined,
     taskContext: store.taskContext || undefined,
     documentFullWidth: store.documentFullWidth || undefined,
@@ -861,6 +862,7 @@ interface LegacyPersistedState {
   darkThemePreset?: unknown;
   darkThemeCustomId?: unknown;
   mcpOrchestrationEnabled?: unknown;
+  allowCrossProjectReads?: unknown;
   documentWorkspacesEnabled?: unknown;
   taskContext?: unknown;
   documentFullWidth?: unknown;
@@ -986,6 +988,11 @@ export async function loadState(): Promise<void> {
     });
     throw error;
   }
+  // Off in the main process until acknowledged, so a failure only keeps cross-project reads off.
+  await delegationRequest({
+    action: 'crossProjectReadSetting',
+    enabled: raw.allowCrossProjectReads === true,
+  }).catch((error: unknown) => console.warn('Could not restore cross-project reads:', error));
 
   // Restore acknowledged authority before store insertion can mount and spawn terminals.
   for (const project of projects) {
@@ -993,6 +1000,7 @@ export async function loadState(): Promise<void> {
       action: 'projectPolicy',
       policy: {
         projectId: project.id,
+        projectName: project.name,
         allowPeerAccess: project.allowPeerAccess === true,
       },
     }).catch((error: unknown) => console.warn('Could not restore project permissions:', error));
@@ -1228,6 +1236,7 @@ export async function loadState(): Promise<void> {
       }
 
       s.mcpOrchestrationEnabled = raw.mcpOrchestrationEnabled !== false;
+      s.allowCrossProjectReads = raw.allowCrossProjectReads === true;
       s.documentWorkspacesEnabled = raw.documentWorkspacesEnabled === true;
       s.taskContext = raw.taskContext === true;
       s.documentFullWidth = raw.documentFullWidth === true;

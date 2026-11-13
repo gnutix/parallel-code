@@ -8,6 +8,7 @@ import { ChangeTourButton } from './ChangeTourButton';
 import { CompletionReport } from './CompletionReport';
 import { ConfirmDialog } from './ConfirmDialog';
 import { CreatePrDialog } from './CreatePrDialog';
+import { createPrInOneClick, oneClickPrStep } from './one-click-pr';
 import { DiffViewerDialog } from './DiffViewerDialog';
 import { FeatureHint } from './FeatureHint';
 import { MergeReadinessPanel } from './MergeReadinessPanel';
@@ -45,7 +46,7 @@ interface FinishDialogProps {
   open: boolean;
   task: Task;
   initialCleanup: boolean;
-  /** Opens Create pull request on top, as the shortcut and the task menu do. */
+  /** Opens Create pull request alone, as Write pull request… in the task menu does; closing it closes both. */
   initialCreatePr: boolean;
   tour: ChangeTourController;
   /** Opens a ready tour, or starts generating one, like the Changed Files button. */
@@ -91,10 +92,11 @@ export function FinishDialog(props: FinishDialogProps) {
   createEffect(() => {
     if (!props.open) setReviewLocation(undefined);
   });
-  // A tour is judged against the code as it is now, edits since the last turn included.
+  // A tour or the brief's changes summary is judged against the code as it is
+  // now, edits since the last turn included.
   createEffect(
     on(
-      () => props.open && !!props.tour.basis(),
+      () => props.open && (!!props.tour.basis() || !!props.task.brief?.brief.changes),
       (check) => {
         if (!check) return;
         refreshCodeFingerprint(props.task.id).catch((error: unknown) =>
@@ -118,6 +120,15 @@ export function FinishDialog(props: FinishDialogProps) {
     },
   });
   const [createPrOpen, setCreatePrOpen] = createSignal(false);
+  // Opened straight to Create PR: Finish stays hidden, so there is nothing to return to.
+  // Derived, not set on open, so Finish never mounts for a render before hiding.
+  const prOnly = () => props.initialCreatePr;
+  const finishShown = () => props.open && !prOnly();
+  // Reset even when closing everything, or the next plain Finish open would mount Create PR for a render.
+  const closeCreatePr = () => {
+    setCreatePrOpen(false);
+    if (prOnly()) props.onClose();
+  };
   const pr = createFinishPr({
     get open() {
       return props.open;
@@ -184,7 +195,7 @@ export function FinishDialog(props: FinishDialogProps) {
       ? undefined
       : (remote() ?? 'none');
   const prCreated = (created: { url: string; existed: boolean; draft: boolean }) => {
-    setCreatePrOpen(false);
+    closeCreatePr();
     const number = parseGitHubUrl(created.url)?.number;
     const what = created.existed ? 'Linked' : created.draft ? 'Created draft' : 'Created';
     showNotification(`${what} pull request #${number}`, {
@@ -215,8 +226,10 @@ export function FinishDialog(props: FinishDialogProps) {
   // verify command by the readiness line, PR checks by the PR section.
   const readinessRows = () =>
     merge.mergeReadiness().checks.filter((check) => !SHOWN_ELSEWHERE.has(check.label));
+  // A one-click create pushes and opens the PR; a push or merge beside it would race it.
+  const creatingPr = () => !!oneClickPrStep(props.task.id);
   const confirmDisabled = () => {
-    if (push.pushing()) return true;
+    if (push.pushing() || creatingPr()) return true;
     if (pushFirst()) return pushDisabled() || !!pushBlocker();
     if (landed()) return false;
     if (pr.mode() === 'pr') return !!pr.busy() || !!pr.blocker();
@@ -230,7 +243,7 @@ export function FinishDialog(props: FinishDialogProps) {
       pr.blocker() ?? (pr.pr()?.isDraft ? 'Marks the draft ready for review first.' : undefined)
     );
   };
-  const pushDisabled = () => push.pushing() || merge.merging() || prMerging();
+  const pushDisabled = () => push.pushing() || creatingPr() || merge.merging() || prMerging();
   /**
    * Why pushing would send the wrong thing. Merge-only blockers such as
    * conflicts stay out: pushing is how a PR gets them resolved. An unreadable
@@ -359,7 +372,7 @@ export function FinishDialog(props: FinishDialogProps) {
   return (
     <>
       <ConfirmDialog
-        open={props.open}
+        open={finishShown()}
         title="Finish task"
         width="560px"
         autoFocusCancel
@@ -369,14 +382,14 @@ export function FinishDialog(props: FinishDialogProps) {
               task={props.task}
               state={merge}
               showBaseSync={showBaseSync()}
-              open={props.open}
+              open={finishShown()}
               onDone={() => props.onClose()}
               onDiffFileClick={props.onDiffFileClick}
             />
             <MergeChanges
               task={props.task}
               state={merge}
-              open={props.open}
+              open={finishShown()}
               onDone={() => props.onClose()}
               onDiffFileClick={props.onDiffFileClick}
             />
@@ -394,7 +407,7 @@ export function FinishDialog(props: FinishDialogProps) {
             </Show>
             <FeatureHint
               id="finish-review"
-              when={props.open && showReadiness()}
+              when={finishShown() && showReadiness()}
               anchor={() => readinessAnchor}
               title="Check what backs this change"
               actions={
@@ -449,7 +462,9 @@ export function FinishDialog(props: FinishDialogProps) {
                 <Show when={remote() && !nothingLeft()}>
                   <CreatePrEntry
                     disabled={push.pushing() || merge.merging()}
-                    onCreate={() => setCreatePrOpen(true)}
+                    creating={creatingPr()}
+                    onCreate={() => void createPrInOneClick(props.task.id)}
+                    onWrite={() => setCreatePrOpen(true)}
                   />
                 </Show>
               }
@@ -544,7 +559,8 @@ export function FinishDialog(props: FinishDialogProps) {
         commits={merge.branchCommits.error ? undefined : merge.branchCommits()}
         push={push}
         onCreated={prCreated}
-        onClose={() => setCreatePrOpen(false)}
+        backLabel={prOnly() ? 'Cancel' : 'Back to Finish'}
+        onClose={closeCreatePr}
       />
       {/* Keep the review provider alive so returning to Finish preserves draft comments. */}
       <DiffViewerDialog

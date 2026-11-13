@@ -2753,7 +2753,31 @@ describe('MCP orchestration policy persistence', () => {
     const actions = mockInvoke.mock.calls
       .filter(([channel]) => channel === IPC.DelegationRequest)
       .map(([, args]) => args.action);
-    expect(actions).toEqual(['orchestrationSetting', 'projectPolicy', 'register']);
+    expect(actions).toEqual([
+      'orchestrationSetting',
+      'crossProjectReadSetting',
+      'projectPolicy',
+      'register',
+    ]);
+  });
+
+  it.each([
+    [true, true],
+    [undefined, false],
+    ['yes', false],
+  ])('restores cross-project reads (%s) in the main process and store', async (saved, expected) => {
+    const state = JSON.parse(stateJson());
+    state.allowCrossProjectReads = saved;
+    mockInvoke.mockResolvedValueOnce(JSON.stringify(state));
+    await loadState();
+    expect(store.allowCrossProjectReads).toBe(expected);
+    expect(mockInvoke).toHaveBeenCalledWith(IPC.DelegationRequest, {
+      action: 'crossProjectReadSetting',
+      enabled: expected,
+    });
+    await saveState();
+    const persisted = mockInvoke.mock.calls.find(([channel]) => channel === IPC.SaveAppState);
+    expect(JSON.parse(persisted?.[1].json).allowCrossProjectReads).toBe(expected || undefined);
   });
 
   it.each([undefined, true, 'invalid'])(
@@ -2782,7 +2806,7 @@ describe('MCP orchestration policy persistence', () => {
       expect(store.projects[0].allowPeerAccess).toBe(true);
       expect(mockInvoke).toHaveBeenCalledWith(IPC.DelegationRequest, {
         action: 'projectPolicy',
-        policy: { projectId: 'project-1', allowPeerAccess: true },
+        policy: { projectId: 'project-1', projectName: 'Repo', allowPeerAccess: true },
       });
       await saveState();
       const persisted = mockInvoke.mock.calls.find(([channel]) => channel === IPC.SaveAppState);

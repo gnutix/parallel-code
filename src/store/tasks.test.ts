@@ -103,7 +103,10 @@ vi.mock('./projects', () => ({
   getProjectBranchPrefix: vi.fn(),
   isProjectMissing: vi.fn(),
 }));
-vi.mock('../lib/bookmarks', () => ({ setPendingShellCommand: vi.fn() }));
+vi.mock('../lib/bookmarks', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/bookmarks')>()),
+  setPendingShellCommand: vi.fn(),
+}));
 // No close animation: a closed task leaves the store on a 0ms timer, which the
 // top-level afterEach drains, so it cannot delete the next test's same-id task.
 vi.mock('../lib/reducedMotion', () => ({ prefersMotion: () => false }));
@@ -160,6 +163,7 @@ vi.stubGlobal('window', {
 
 import {
   createTask,
+  createImportedTask,
   initMCPListeners,
   setTaskControl,
   collapseTask,
@@ -186,12 +190,14 @@ import {
   selectActiveNeighborAfterRemoval,
   updateTaskName,
   forgetTask,
+  runBookmarkInTask,
+  spawnProgramForTask,
 } from './tasks';
 import { armSpCompletion, fireSpCompletion, onTaskRenamed } from './superProductivity';
 import { updateTaskBranch } from './task-branch';
 import { getCoordinatorChildren } from './sidebar-order';
 import { recordMergedLines, recordTaskMerged } from './completion';
-import { markAgentSpawned, rescheduleTaskStatusPolling } from './taskStatus';
+import { isAgentIdle, markAgentSpawned, rescheduleTaskStatusPolling } from './taskStatus';
 import { saveState } from './persistence';
 import { MAX_PROMPT_HISTORY } from '../lib/prompt-history';
 import { getProject, getProjectBranchPrefix, getProjectPath, isProjectMissing } from './projects';
@@ -1589,6 +1595,107 @@ describe('createTask initial agent state', () => {
   });
 });
 
+// Bringing back a worktree whose task was lost: the pane must reopen the
+// conversation that was running there, not start an empty one.
+describe('createImportedTask', () => {
+  const claude = {
+    id: 'claude-code',
+    name: 'Claude',
+    command: 'claude',
+    args: [],
+    resume_args: [],
+    skip_permissions_args: [],
+    description: 'Claude',
+  };
+  const worktree = {
+    path: '/repo/.worktrees/task/old-work-123456',
+    branch_name: 'task/old-work-123456',
+    has_committed_changes: true,
+    has_uncommitted_changes: false,
+    app_created: true,
+  };
+  const sessionId = '240604e8-6d6c-43ce-9178-6d63236f39a9';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const harness = expectDefined(core.harness, 'mock store harness');
+    harness.reset(harness.state());
+    harness.store.preferUiMode = false;
+    mockTasks = {};
+    mockAgents = {};
+    mockTaskOrder = [];
+    vi.mocked(getProjectPath).mockReturnValue('/repo');
+    vi.mocked(isProjectMissing).mockReturnValue(false);
+    mockProjects = [{ id: 'proj-1', path: '/repo' }];
+    mockInvoke.mockResolvedValue(undefined);
+  });
+
+  it('resumes the chosen session in the first pane', async () => {
+    const taskId = await createImportedTask({
+      projectId: 'proj-1',
+      worktree,
+      agentDef: claude,
+      resumeSessionId: sessionId,
+    });
+    const task = mockTasks[taskId];
+    const agentId = expectDefined(task.agentIds[0], 'first pane id');
+    expect(task.agentSessionIds).toEqual({ [agentId]: sessionId });
+    expect(mockAgents[agentId]).toMatchObject({ resumed: true });
+  });
+
+  it('starts a fresh conversation without a session to resume', async () => {
+    const taskId = await createImportedTask({ projectId: 'proj-1', worktree, agentDef: claude });
+    const task = mockTasks[taskId];
+    const agentId = expectDefined(task.agentIds[0], 'first pane id');
+    expect(task.agentSessionIds?.[agentId]).toEqual(expect.any(String));
+    expect(task.agentSessionIds?.[agentId]).not.toBe(sessionId);
+    expect(mockAgents[agentId]).toMatchObject({ resumed: false });
+  });
+
+  it('leaves the worktree alone on close unless cleanup was chosen', async () => {
+    const kept = await createImportedTask({ projectId: 'proj-1', worktree, agentDef: claude });
+    expect(mockTasks[kept].externalWorktree).toBe(true);
+    mockTasks = {};
+    mockTaskOrder = [];
+    const owned = await createImportedTask({
+      projectId: 'proj-1',
+      worktree,
+      agentDef: claude,
+      cleanupOnClose: true,
+    });
+    expect(mockTasks[owned].externalWorktree).toBe(false);
+  });
+
+  it('takes focus unless told not to', async () => {
+    const state = expectDefined(core.harness, 'mock store harness').store as {
+      activeTaskId?: string;
+    };
+    const focused = await createImportedTask({ projectId: 'proj-1', worktree, agentDef: claude });
+    expect(state.activeTaskId).toBe(focused);
+    mockTasks = {};
+    mockTaskOrder = [];
+    const background = await createImportedTask({
+      projectId: 'proj-1',
+      worktree,
+      agentDef: claude,
+      activate: false,
+    });
+    expect(state.activeTaskId).toBe(focused);
+    expect(mockTasks[background]).toBeDefined();
+  });
+
+  it('creates one task when the same worktree is imported twice at once', async () => {
+    const opts = { projectId: 'proj-1', worktree, agentDef: claude };
+    const results = await Promise.allSettled([createImportedTask(opts), createImportedTask(opts)]);
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(Object.keys(mockTasks)).toHaveLength(1);
+    // The reservation ends with the import, so a later import after closing works.
+    mockTasks = {};
+    mockTaskOrder = [];
+    await expect(createImportedTask(opts)).resolves.toEqual(expect.any(String));
+  });
+});
+
 // ─── sendPrompt tests ─────────────────────────────────────────────────────────
 
 function writePayloads(): string[] {
@@ -2838,5 +2945,23 @@ describe('mergeTask / pushTask preconditions', () => {
     vi.mocked(getProjectPath).mockReturnValue(undefined);
     await expect(pushTask('task-2', channel)).rejects.toThrow('Project folder not found');
     expect(mockInvoke).not.toHaveBeenCalled();
+  });
+});
+
+describe('runBookmarkInTask', () => {
+  it('never types a bookmark into a quiet program terminal such as a cloud session', () => {
+    mockTasks['task-b'] = { agentIds: [], shellAgentIds: [] };
+    const programId = spawnProgramForTask('task-b', { command: 'claude', args: ['--cloud', 'x'] });
+    vi.mocked(isAgentIdle).mockReturnValue(true);
+    mockInvoke.mockClear();
+    mockInvoke.mockResolvedValue(undefined);
+
+    runBookmarkInTask('task-b', 'npm test');
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      IPC.WriteToAgent,
+      expect.objectContaining({ agentId: programId }),
+    );
+    expect(mockTasks['task-b'].shellAgentIds).toHaveLength(2);
   });
 });

@@ -4,7 +4,13 @@ import { reconcile } from 'solid-js/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { store, setStore } from '../store/core';
 import { boardSidePanelOpen } from '../store/project-pages';
-import { checksFromUpdate, removePrChecks, setPrChecks } from '../store/pr-checks-state';
+import {
+  checksFromUpdate,
+  forgetTaskPrsDetected,
+  markTaskPrsDetected,
+  removePrChecks,
+  setPrChecks,
+} from '../store/pr-checks-state';
 import {
   getTaskFocusedPanel,
   navigateColumn,
@@ -1053,6 +1059,23 @@ describe('next task that needs you', () => {
     expect(getTaskFocusedPanel('review')).toBe('shell:0');
   });
 
+  it('scrolls the card it lands on into view, leaving the keyboard in the pane', async () => {
+    // happy-dom lays nothing out, so record the scroll request instead.
+    const scrolled: Element[] = [];
+    const spy = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (
+      this: Element,
+    ) {
+      scrolled.push(this);
+    });
+    setStore('activeTaskId', 'pr');
+    (document.activeElement as HTMLElement | null)?.blur();
+    openNextAttentionTask();
+    await Promise.resolve();
+    spy.mockRestore();
+    expect(scrolled).toEqual([document.querySelector('[data-board-task-id="review"]')]);
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('stays put when nothing else is waiting', () => {
     setStore('tasks', 'idle', 'prUrl', 'https://github.com/o/r/pull/7');
     setStore('activeTaskId', 'review');
@@ -1102,4 +1125,32 @@ describe('board tips', () => {
     vi.advanceTimersByTime(650);
     expect(tip()?.textContent).toContain('Tasks sort themselves by what they need');
   });
+});
+
+it('shows the Done lane only while a merged task with nothing left sits in it', () => {
+  expect(lane('Done')).toBeUndefined();
+  setStore('taskGitStatus', 'pr', {
+    has_committed_changes: true,
+    has_uncommitted_changes: false,
+    current_branch: 'task/pr',
+    base_branch: 'main',
+    head_sha: 'a'.repeat(40),
+    refreshedAt: Date.now(),
+  });
+  markTaskPrsDetected('pr');
+  setPrChecks('pr', {
+    ...checksFromUpdate({ overall: 'none', headSha: 'a'.repeat(40) }),
+    merged: true,
+  });
+  expect(cardNames('Done')).toEqual(['Add dark mode']);
+  expect(lane('Done')?.textContent).toContain('Merged, nothing left');
+  setStore('taskGitStatus', 'pr', 'has_uncommitted_changes', true);
+  expect(lane('Done')).toBeUndefined();
+  expect(lane('Stopped')?.textContent).toContain('Mostly done: Uncommitted changes');
+  // Merging settled the recorded loose ends, so hovering must not list them.
+  setStore('tasks', 'pr', 'finishItems', { items: ['Update the changelog'], publishedAt: 1 });
+  expect(lane('Stopped')?.querySelector('[title*="Update the changelog"]')).toBeNull();
+  setStore('tasks', 'pr', 'finishItems', undefined);
+  removePrChecks('pr');
+  forgetTaskPrsDetected();
 });

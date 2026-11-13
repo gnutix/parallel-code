@@ -1,8 +1,10 @@
 import { createEffect, createRoot, createSignal, untrack } from 'solid-js';
+import { isClaudeCommand } from '../lib/claude-cloud';
 import { createStore } from 'solid-js/store';
 import { isAgentChat } from './agent-chat';
 import { isAgentSuspended } from './agent-suspend';
 import { invoke } from '../lib/ipc';
+import { isWindowVisible } from '../lib/windowVisibility';
 import { IPC } from '../../electron/ipc/channels';
 import { store, setStore } from './core';
 import type { WorktreeStatus } from '../ipc/types';
@@ -1150,7 +1152,7 @@ export function isAgentBlockedOnInput(agentId: string): boolean {
 
 /** Hooks run for Claude only when its command is `claude` (main's `isClaudeCommand`). */
 export function isClaudeAgent(agentId: string): boolean {
-  return store.agents?.[agentId]?.def?.command?.split(/[\\/]/).pop() === 'claude';
+  return isClaudeCommand(store.agents?.[agentId]?.def?.command ?? '');
 }
 
 /** Whether a hook's `working` claim still stands. A lost `Stop` would hold it
@@ -1340,6 +1342,16 @@ export function isTaskGitStatusKnown(taskId: string): boolean {
   return isGitStatusUsable(store.taskGitStatus[taskId]);
 }
 
+/** Whether the last git status read still describes the worktree, even while a
+ *  re-read runs: refreshes start on every agent spawn and exit, and a verdict that
+ *  drops out for each would make the board jump. A placeholder (never read) fails. */
+export function isTaskGitStatusFresh(taskId: string): boolean {
+  const git = store.taskGitStatus[taskId];
+  return Boolean(
+    git && !git.error && !git.stale && Date.now() - git.refreshedAt <= GIT_STATUS_STALE_MS,
+  );
+}
+
 function isGitStatusUsable(git: TaskGitStatusSnapshot | undefined): git is TaskGitStatusSnapshot {
   return Boolean(
     git &&
@@ -1519,7 +1531,8 @@ async function refreshTaskGitStatus(
 let isRefreshingAll = false;
 let refreshAllStartedAt = 0;
 
-/** Refresh git status for inactive tasks (active task is handled by its own 5s timer).
+/** Refresh git status for inactive tasks (active task is handled by its own 5s timer,
+ *  except while the window is hidden and that timer pauses).
  *  Limits concurrency to avoid spawning too many parallel git processes. */
 export async function refreshAllTaskGitStatus(): Promise<void> {
   if (isRefreshingAll && Date.now() - refreshAllStartedAt < 60_000) return;
@@ -1528,9 +1541,11 @@ export async function refreshAllTaskGitStatus(): Promise<void> {
   try {
     const taskIds = store.taskOrder;
     const currentTaskId = store.activeTaskId;
+    const windowVisible = isWindowVisible();
     const toRefresh = taskIds.filter((taskId) => {
       // Active task is covered by the faster refreshActiveTaskGitStatus timer
-      if (taskId === currentTaskId) return false;
+      // — while it runs. Hidden, the sweep keeps it from going stale.
+      if (taskId === currentTaskId && windowVisible) return false;
       if (!store.tasks[taskId]) return false;
       // Only agent work makes a snapshot moot. A busy shell (dev server) or a
       // prompt redraw must not freeze it until it goes stale and drops `ready`.
@@ -1548,10 +1563,11 @@ export async function refreshAllTaskGitStatus(): Promise<void> {
   }
 }
 
-/** Refresh git status for the currently active task only. */
+/** Refresh git status for the currently active task only. A 5s cadence is for
+ *  a watched UI; while the window is hidden the slower sweep covers it. */
 async function refreshActiveTaskGitStatus(): Promise<void> {
   const taskId = store.activeTaskId;
-  if (!taskId) return;
+  if (!taskId || !isWindowVisible()) return;
   await refreshTaskGitStatus(taskId);
 }
 

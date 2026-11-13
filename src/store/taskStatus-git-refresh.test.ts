@@ -6,6 +6,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // exact behavior the flag-lifecycle regressions cover.
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock('../lib/ipc', () => ({ invoke: invokeMock }));
+const windowState = vi.hoisted(() => ({ visible: true }));
+vi.mock('../lib/windowVisibility', () => ({ isWindowVisible: () => windowState.visible }));
 vi.mock('../lib/log', async (importOriginal) => ({
   // Keep the real errMessage; only silence the log channels.
   ...(await importOriginal<typeof import('../lib/log')>()),
@@ -23,6 +25,8 @@ import {
   getBranchDivergence,
   markAgentBusy,
   clearAgentActivity,
+  startTaskStatusPolling,
+  stopTaskStatusPolling,
 } from './taskStatus';
 import { undoBranchAdoption } from './task-branch';
 import { IPC } from '../../electron/ipc/channels';
@@ -101,6 +105,7 @@ function worktreeStatusCalls(taskId: string): unknown[] {
 
 afterEach(() => {
   invokeMock.mockReset();
+  windowState.visible = true;
   for (const agentId of seededAgentIds.splice(0)) {
     clearAgentActivity(agentId);
     setStore('agents', agentId, undefined as unknown as Agent);
@@ -298,5 +303,56 @@ describe('git status freshness', () => {
     await refreshAllTaskGitStatus();
 
     expect(worktreeStatusCalls('t-busy')).toHaveLength(0);
+  });
+
+  it('leaves the active task to its fast timer while the window is visible', async () => {
+    const previousActive = store.activeTaskId;
+    seedTask('t-active');
+    setStore('taskOrder', [...store.taskOrder, 't-active']);
+    setStore('activeTaskId', 't-active');
+    invokeMock.mockResolvedValue(worktreeStatus('task/t-active'));
+    try {
+      await refreshAllTaskGitStatus();
+      expect(worktreeStatusCalls('t-active')).toHaveLength(0);
+
+      // The fast timer pauses while hidden; the sweep must keep the snapshot
+      // from going stale and dropping the task from ready.
+      windowState.visible = false;
+      await refreshAllTaskGitStatus();
+      expect(worktreeStatusCalls('t-active')).toHaveLength(1);
+    } finally {
+      setStore('activeTaskId', previousActive);
+    }
+  });
+
+  it('pauses the 5s active-task poll while the window is hidden', async () => {
+    const previousActive = store.activeTaskId;
+    seedTask('t-poll');
+    setStore('taskOrder', [...store.taskOrder, 't-poll']);
+    setStore('activeTaskId', 't-poll');
+    invokeMock.mockResolvedValue(worktreeStatus('task/t-poll'));
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      startTaskStatusPolling();
+      await flush();
+      expect(worktreeStatusCalls('t-poll')).toHaveLength(1);
+
+      windowState.visible = false;
+      // Three 5s ticks, all well inside the 30s+ background sweep interval.
+      for (let tick = 0; tick < 3; tick++) {
+        vi.advanceTimersByTime(5_000);
+        await flush();
+      }
+      expect(worktreeStatusCalls('t-poll')).toHaveLength(1);
+
+      windowState.visible = true;
+      vi.advanceTimersByTime(5_000);
+      await flush();
+      expect(worktreeStatusCalls('t-poll')).toHaveLength(2);
+    } finally {
+      stopTaskStatusPolling();
+      vi.useRealTimers();
+      setStore('activeTaskId', previousActive);
+    }
   });
 });

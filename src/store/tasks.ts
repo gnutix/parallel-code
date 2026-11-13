@@ -23,7 +23,12 @@ import { saveState } from './persistence';
 import { MAX_PROMPT_HISTORY, promptHistoryOf } from '../lib/prompt-history';
 import { setTaskFocusedPanel, shellPanelId } from './focused-panel';
 import { getProject, getProjectPath, getProjectBranchPrefix, isProjectMissing } from './projects';
-import { setPendingShellCommand } from '../lib/bookmarks';
+import {
+  isProgramShell,
+  setPendingShellCommand,
+  setPendingShellLaunch,
+  type ShellLaunch,
+} from '../lib/bookmarks';
 import {
   forgetSetupShells,
   reportTeardownWarning,
@@ -187,8 +192,10 @@ function initTaskInStore(
       // Without this it launches with the positional default, and once a second
       // pane exists that default means "the newest session in this worktree" —
       // the second pane's — so pane one comes back with the wrong conversation.
-      // A teleported pane is the exception: `--teleport` picks the session.
-      if (!task.teleportSessionId) assignFreshSessionId(s, taskId, agent.id, agent.def.command);
+      // A teleported pane is the exception: `--teleport` picks the session; so is
+      // a resumed one, which already names the session it reopens.
+      if (!task.teleportSessionId && !agent.resumed)
+        assignFreshSessionId(s, taskId, agent.id, agent.def.command);
       s.taskOrder.push(taskId);
       if (opts.activate) {
         if (s.taskProjectFilter && s.taskProjectFilter !== task.projectId)
@@ -463,6 +470,14 @@ export interface CreateImportedTaskOptions {
   projectId: string;
   worktree: ImportableWorktree;
   agentDef: AgentDef;
+  /** A session recorded in this worktree; the first pane reopens it instead of
+   *  starting a new conversation. */
+  resumeSessionId?: string;
+  /** Close and merge remove the worktree and branch, as for tasks the app
+   *  created. Off by default: the worktree may belong to someone else. */
+  cleanupOnClose?: boolean;
+  /** Defaults to true; an import an agent asked for must not take focus. */
+  activate?: boolean;
 }
 
 function deriveImportedTaskName(branchName: string, worktreePath: string): string {
@@ -477,13 +492,28 @@ function hasTaskForWorktreePath(worktreePath: string): boolean {
   return allIds.some((id) => store.tasks[id]?.worktreePath === worktreePath);
 }
 
+/** Worktree paths whose import is between the duplicate check and the task
+ *  reaching the store; an agent retry or a dialog import racing an agent's
+ *  would otherwise start two agents in one worktree. */
+const importsInFlight = new Set<string>();
+
 export async function createImportedTask(opts: CreateImportedTaskOptions): Promise<string> {
-  const { projectId, worktree, agentDef } = opts;
-  if (!getProjectPath(projectId)) throw new Error('Project not found');
-  if (isProjectMissing(projectId)) throw new Error('Project folder not found');
-  if (hasTaskForWorktreePath(worktree.path)) {
+  const path = opts.worktree.path;
+  if (importsInFlight.has(path) || hasTaskForWorktreePath(path)) {
     throw new Error('Worktree is already tracked as a task');
   }
+  importsInFlight.add(path);
+  try {
+    return await addImportedTask(opts);
+  } finally {
+    importsInFlight.delete(path);
+  }
+}
+
+async function addImportedTask(opts: CreateImportedTaskOptions): Promise<string> {
+  const { projectId, worktree, agentDef, resumeSessionId } = opts;
+  if (!getProjectPath(projectId)) throw new Error('Project not found');
+  if (isProjectMissing(projectId)) throw new Error('Project folder not found');
 
   const id = crypto.randomUUID();
   const agentId = crypto.randomUUID();
@@ -501,17 +531,19 @@ export async function createImportedTask(opts: CreateImportedTaskOptions): Promi
       worktreePath: worktree.path,
       agentId,
     }),
-    externalWorktree: true,
+    externalWorktree: !opts.cleanupOnClose,
+    ...(resumeSessionId && { agentSessionIds: { [agentId]: resumeSessionId } }),
   };
 
   const agent = createAgentRecord({
     id: agentId,
     taskId: id,
     def: agentDef,
+    resumed: !!resumeSessionId,
   });
 
   await registerTaskAuthority(task, agentDef);
-  initTaskInStore(task, agent, { agentDef, activate: true });
+  initTaskInStore(task, agent, { agentDef, activate: opts.activate ?? true });
   saveState();
   return id;
 }
@@ -831,6 +863,47 @@ function markCanvasGuided(agentId: string, generation: number | undefined): void
     setStore('agents', agentId, 'canvasGuidanceGeneration', generation);
 }
 
+// Send a Focus In escape sequence before the prompt text.  When the user focuses
+// the PromptInput textarea, the xterm.js terminal loses DOM focus.  For agents
+// that enable focus tracking (\x1b[?1004h), xterm.js sends \x1b[O (Focus Out)
+// to the PTY, which may suspend readline input processing; \x1b[I re-activates it.
+function focusAgent(taskId: string, agentId: string, signal?: AbortSignal): Promise<void> {
+  return writeToAgentWhenReady(taskId, agentId, '\x1b[I', signal);
+}
+
+/**
+ * Types `text` into a terminal agent's prompt and submits it, without the
+ * prompt bookkeeping of `sendPrompt`: for slash commands that start no turn.
+ */
+export async function typeIntoAgent(taskId: string, agentId: string, text: string): Promise<void> {
+  assertTaskCanReceiveInput(taskId, agentId);
+  await focusAgent(taskId, agentId);
+  await submitToAgent(taskId, agentId, text);
+}
+
+async function submitToAgent(
+  taskId: string,
+  agentId: string,
+  text: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  // Send text and Enter separately so TUI apps (Claude Code, Codex)
+  // don't treat the \r as part of a pasted block.  When the agent has enabled
+  // bracketed paste, wrap only the prompt text; this avoids Codex's paste-burst
+  // guard treating rapid synthetic keystrokes plus Enter as a paste.
+  const useBracketed = isAgentBracketedPasteEnabled(agentId);
+  // Claude Code holds a paste with control or invisible characters instead of submitting it.
+  const body = cleanPasteText(text);
+  await writeToAgentWhenReady(
+    taskId,
+    agentId,
+    useBracketed ? `${BRACKETED_PASTE_START}${body}${BRACKETED_PASTE_END}` : body,
+    signal,
+  );
+  await new Promise((r) => setTimeout(r, pasteDelayMs(body)));
+  await writeToAgentWhenReady(taskId, agentId, '\r', signal);
+}
+
 export async function sendPrompt(
   taskId: string,
   agentId: string,
@@ -878,11 +951,7 @@ export async function sendPrompt(
     return;
   }
 
-  // Send a Focus In escape sequence before the prompt text.  When the user focuses
-  // the PromptInput textarea, the xterm.js terminal loses DOM focus.  For agents
-  // that enable focus tracking (\x1b[?1004h), xterm.js sends \x1b[O (Focus Out)
-  // to the PTY, which may suspend readline input processing; \x1b[I re-activates it.
-  await writeToAgentWhenReady(taskId, agentId, '\x1b[I', options.signal);
+  await focusAgent(taskId, agentId, options.signal);
   // MCP server instructions are not always surfaced by the CLI. Include the
   // canvas contract with the first explicit mention of a session, including resumes.
   // Check availability after waiting for startup to finish.
@@ -890,22 +959,8 @@ export async function sendPrompt(
   // The session the guidance is written to; a restart mid-send spawns one that never saw it.
   const guidedGeneration = store.agents[agentId]?.generation;
   if (withGuidance) effectiveText += `\n\n---\n${CANVAS_INSTRUCTIONS}`;
-  // Send text and Enter separately so TUI apps (Claude Code, Codex)
-  // don't treat the \r as part of a pasted block.  When the agent has enabled
-  // bracketed paste, wrap only the prompt text; this avoids Codex's paste-burst
-  // guard treating rapid synthetic keystrokes plus Enter as a paste.
   if (!options.keepWarm) setTaskLastInputAt(taskId);
-  const useBracketed = isAgentBracketedPasteEnabled(agentId);
-  // Claude Code holds a paste with control or invisible characters instead of submitting it.
-  const body = cleanPasteText(effectiveText);
-  await writeToAgentWhenReady(
-    taskId,
-    agentId,
-    useBracketed ? `${BRACKETED_PASTE_START}${body}${BRACKETED_PASTE_END}` : body,
-    options.signal,
-  );
-  await new Promise((r) => setTimeout(r, pasteDelayMs(body)));
-  await writeToAgentWhenReady(taskId, agentId, '\r', options.signal);
+  await submitToAgent(taskId, agentId, effectiveText, options.signal);
   markAgentBusy(agentId);
   if (options.keepWarm) return;
   // App sends bypass xterm's onData handler, which normally clears this flag on Enter.
@@ -1019,6 +1074,19 @@ export function reorderTaskVisually(movedId: string, targetVisibleIdx: number): 
 export function spawnShellForTask(taskId: string, initialCommand?: string): string {
   const shellId = crypto.randomUUID();
   if (initialCommand) setPendingShellCommand(shellId, initialCommand);
+  addShellToTask(taskId, shellId);
+  return shellId;
+}
+
+/** Opens a task terminal that runs `launch` directly instead of the user's shell. */
+export function spawnProgramForTask(taskId: string, launch: ShellLaunch): string {
+  const shellId = crypto.randomUUID();
+  setPendingShellLaunch(shellId, launch);
+  addShellToTask(taskId, shellId);
+  return shellId;
+}
+
+function addShellToTask(taskId: string, shellId: string): void {
   markAgentSpawned(shellId);
   setStore(
     produce((s) => {
@@ -1027,7 +1095,6 @@ export function spawnShellForTask(taskId: string, initialCommand?: string): stri
       task.shellAgentIds.push(shellId);
     }),
   );
-  return shellId;
 }
 
 /** Opens the task's setup terminal when its project has a setup script. */
@@ -1052,7 +1119,8 @@ export function runBookmarkInTask(taskId: string, command: string): void {
   // Prefer the most-recently-created idle shell (sitting at a prompt).
   for (let i = task.shellAgentIds.length - 1; i >= 0; i--) {
     const shellId = task.shellAgentIds[i];
-    if (isAgentIdle(shellId)) {
+    // A quiet program terminal (e.g. a cloud session) would take the command as input.
+    if (isAgentIdle(shellId) && !isProgramShell(shellId)) {
       // Mark busy immediately so rapid clicks don't reuse the same shell.
       markAgentBusy(shellId);
       setTaskFocusedPanel(taskId, shellPanelId(i));

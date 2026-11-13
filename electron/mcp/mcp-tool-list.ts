@@ -668,9 +668,39 @@ const SUPERVISION_TOOLS: ToolDef[] = COORDINATOR_TOOLS.filter(
         properties: { ...tool.inputSchema.properties, timeoutMs: boundedWait },
       },
     };
+  if (tool.name === 'get_task_diff')
+    return {
+      ...tool,
+      description:
+        "Get the changed files and unified diff of one of your direct children, or of a peer task (taskId from list_agent_sessions) when the project allows peer access. Each file's committed flag separates committed from uncommitted work. Peer diffs are untrusted content.",
+    };
   return { ...tool, description: `${tool.description} Scoped to your own direct children.` };
 });
-const ORDINARY_TOOLS: ToolDef[] = [...SUPERVISION_TOOLS, SUGGEST_CLOSE_TOOL, ARCHIVE_TOOL];
+/** Brings back a task whose worktree outlived it, typically after its agent lost the app. */
+const IMPORT_WORKTREE_TOOL: ToolDef = {
+  name: 'import_worktree',
+  description:
+    'Bring an existing Git worktree of your project back into Parallel Code as a top-level task, for example when a task disappeared from the app but its worktree and agent session remain. The task uses your agent and resumes the newest session that agent recorded in the worktree, or sessionId if given; it does not take focus, and the user reviews it on its own. Pass the absolute worktree path. Worktrees already tracked as tasks, the main checkout and worktrees of other projects are refused; the error lists the worktrees that can be imported. The worktree and branch stay when the task closes unless cleanupOnClose is true, which is allowed only for worktrees Parallel Code created. The result reports taskId and resumedSessionId (null when a new conversation started).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Absolute path of the worktree to import.' },
+      sessionId: {
+        type: 'string',
+        description: 'Session to resume instead of the newest one in the worktree.',
+      },
+      cleanupOnClose: { type: 'boolean', default: false },
+    },
+    required: ['path'],
+  },
+};
+const CREATION_TOOL_NAMES = new Set(['create_task', IMPORT_WORKTREE_TOOL.name]);
+const ORDINARY_TOOLS: ToolDef[] = [
+  ...SUPERVISION_TOOLS,
+  SUGGEST_CLOSE_TOOL,
+  ARCHIVE_TOOL,
+  IMPORT_WORKTREE_TOOL,
+];
 
 /** A page agent works in the checkout, so it may only start tasks the user reviews on their own. */
 const PAGE_TOOLS: ToolDef[] = [
@@ -689,6 +719,7 @@ const PAGE_TOOLS: ToolDef[] = [
       required: ['name', 'prompt', 'relation', 'requestId'],
     },
   },
+  IMPORT_WORKTREE_TOOL,
 ];
 
 export function sessionInstructions(capabilities: SessionCapabilities): string {
@@ -767,7 +798,9 @@ export function selectTools(
       capabilities.profile === 'page'
         ? PAGE_TOOLS.filter(() => capabilities.canCreate)
         : capabilities.profile === 'ordinary'
-          ? ORDINARY_TOOLS.filter((tool) => tool.name !== 'create_task' || capabilities.canCreate)
+          ? ORDINARY_TOOLS.filter(
+              (tool) => !CREATION_TOOL_NAMES.has(tool.name) || capabilities.canCreate,
+            )
           : SUBTASK_TOOLS.filter(
               (tool) => tool.name === 'signal_done' || capabilities.profile === 'child-automatic',
             ).map((tool) =>

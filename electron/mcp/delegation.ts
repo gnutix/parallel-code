@@ -1,13 +1,14 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Coordinator } from './coordinator.js';
 import type { CoordinatedTask } from './types.js';
 import { parseSignalDoneInput } from '../shared/completion-report.js';
 import { CLOSE_SUGGESTION_REASON_MAX } from '../shared/close-suggestion.js';
 import { parseLandSelfInput } from './land-self-input.js';
+import { getWorktreeDiff } from './worktree-diff.js';
 import { isProjectPageAgentTaskId } from '../shared/project-page-agents.js';
 import {
   getAgentPromptReadiness,
@@ -16,6 +17,7 @@ import {
 } from './prompt-detect.js';
 import { canConfigureCanvasMcp } from './canvas-config.js';
 import { validateBranchName } from './validation.js';
+import { isSessionId } from '../shared/session-record.js';
 import {
   clampIndependentTasksPerCreator,
   DEFAULT_INDEPENDENT_TASKS_PER_CREATOR,
@@ -40,6 +42,7 @@ import type {
   DelegationRequest,
   DelegationSnapshot,
   DelegationState,
+  ImportWorktreeRequest,
   IndependentTaskRequest,
   IntegrationPolicy,
   PeerMessage,
@@ -207,6 +210,9 @@ export class DelegationService {
       persist: () => void;
       parentCreated?: (taskId: string) => void;
       createIndependent: (request: IndependentTaskRequest) => Promise<{ taskId: string }>;
+      importWorktree: (
+        request: ImportWorktreeRequest,
+      ) => Promise<{ taskId: string; resumedSessionId: string | null }>;
     },
   ) {
     this.orchestrationEnabled = options.orchestrationEnabled ?? true;
@@ -575,6 +581,31 @@ export class DelegationService {
     return promise;
   }
 
+  /** Brings a worktree back as a top-level task the user reviews, open to the same sessions
+   *  as independent tasks. The renderer checks the path is one of the creator's project's
+   *  worktrees, since only it knows which ones are already tracked. */
+  // shortcut: no per-creator cap or launch guard like createIndependent — the project's
+  // untracked worktrees bound the count and no slow worktree build is in flight; add
+  // maxIndependentPerCreator accounting if agents start importing in bulk.
+  private importWorktree(
+    creatorTaskId: string,
+    params: Record<string, unknown>,
+    caller: SessionCaller,
+  ): Promise<{ taskId: string; resumedSessionId: string | null }> {
+    this.creationGuard(creatorTaskId, caller, true);
+    const path = text(params.path, 'path', 4096);
+    if (!isAbsolute(path)) throw new DelegationError('path must be an absolute worktree path');
+    const sessionId = params.sessionId;
+    if (sessionId !== undefined && !isSessionId(sessionId))
+      throw new DelegationError('sessionId must be a session id recorded in the worktree');
+    return this.options.importWorktree({
+      creatorTaskId,
+      path,
+      ...(sessionId !== undefined && { sessionId }),
+      cleanupOnClose: params.cleanupOnClose === true,
+    });
+  }
+
   private requireCaller(caller: SessionCaller): Authority {
     if (
       !this.options
@@ -627,6 +658,8 @@ export class DelegationService {
       }
       throw new DelegationError('Tool unavailable to this child session', 403);
     }
+    if (name === 'import_worktree' && ['page', 'ordinary'].includes(caller.capabilities.profile))
+      return this.importWorktree(task.taskId, params, caller);
     if (caller.capabilities.profile === 'page') {
       if (name === 'create_task' && params.relation === 'independent')
         return this.createIndependent(task.taskId, params, caller);
@@ -692,6 +725,23 @@ export class DelegationService {
       });
     }
     const childId = id(params.taskId, 'taskId');
+    const peer = name === 'get_task_diff' ? this.peerTask(task, childId) : undefined;
+    if (peer) {
+      if (!caller.capabilities.peers || !this.canContact(task.taskId, childId))
+        throw new DelegationError(
+          'Peer access to this task is unavailable: it must be open and its project must allow peer access between tasks (a setting only the user can change).',
+          403,
+        );
+      // A checkout-mode task's path is the project root, whose diff isn't that task's work.
+      if (peer.gitIsolation !== 'worktree')
+        throw new DelegationError(
+          'This task works in the project checkout, so it has no diff of its own.',
+          403,
+        );
+      // shortcut: diffs against the detected main branch, since registered top-level tasks
+      // don't record their base — pass the renderer's base branch through if peers stack.
+      return getWorktreeDiff(peer.worktreePath);
+    }
     const child = coordinator?.getTaskStatus(childId);
     // Closed, merged and self-landed children leave the coordinator entirely.
     if (!child)
@@ -746,6 +796,19 @@ export class DelegationService {
     if (sender.parentTaskId) return sender.parentTaskId === targetId;
     if (target.parentTaskId === senderId) return true;
     return !target.parentTaskId && this.policies.get(sender.projectId)?.allowPeerAccess === true;
+  }
+
+  /** Another top-level task of the caller's project: its diff is readable once peer access allows. */
+  private peerTask(caller: Authority, targetId: string): Authority | undefined {
+    const target = this.tasks.get(targetId);
+    if (
+      !target ||
+      targetId === caller.taskId ||
+      target.projectId !== caller.projectId ||
+      target.parentTaskId
+    )
+      return undefined;
+    return target;
   }
 
   private peer(session: SessionCaller): PeerSession {

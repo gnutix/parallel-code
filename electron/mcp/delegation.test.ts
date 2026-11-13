@@ -7,6 +7,7 @@ import type {
   DelegateAssignment,
   DelegationChanged,
   DelegationState,
+  ImportWorktreeRequest,
   IndependentTaskRequest,
   SessionCaller,
   TaskAuthorityInput,
@@ -25,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   promptSnapshot: vi.fn(),
   writePrompt: vi.fn(),
   inputBlocker: vi.fn(),
+  worktreeDiff: vi.fn(),
 }));
 vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [promisify.custom]: mocks.git }),
@@ -40,6 +42,7 @@ vi.mock('../ipc/pty.js', () => ({
   getAgentInputBlocker: mocks.inputBlocker,
 }));
 vi.mock('../ipc/tasks.js', () => ({ deleteTask: mocks.remove }));
+vi.mock('./worktree-diff.js', () => ({ getWorktreeDiff: mocks.worktreeDiff }));
 vi.mock('./canvas-config.js', () => ({
   canConfigureCanvasMcp: (command: string, args: string[]) =>
     command === 'codex' && !args.includes('--mcp-config'),
@@ -89,6 +92,9 @@ let persist: () => void;
 let changed: Mock<(event: DelegationChanged) => void>;
 let prepareParent: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let createIndependent: Mock<(request: IndependentTaskRequest) => Promise<{ taskId: string }>>;
+let importWorktree: Mock<
+  (request: ImportWorktreeRequest) => Promise<{ taskId: string; resumedSessionId: string | null }>
+>;
 
 function task(taskId: string, extra: Partial<TaskAuthorityInput> = {}): TaskAuthorityInput {
   return {
@@ -219,6 +225,7 @@ beforeEach(() => {
   changed = vi.fn();
   prepareParent = vi.fn(async () => {});
   createIndependent = vi.fn(async () => ({ taskId: 'sibling' }));
+  importWorktree = vi.fn(async () => ({ taskId: 'imported', resumedSessionId: null }));
   service = new DelegationService({
     coordinator: async () => core as unknown as Coordinator,
     currentCoordinator: () => core as unknown as Coordinator,
@@ -227,6 +234,7 @@ beforeEach(() => {
     changed,
     persist,
     createIndependent,
+    importWorktree,
   });
 });
 afterEach(() => {
@@ -428,6 +436,73 @@ describe('delegation authority and creation', () => {
       service.callTool(caller, 'create_task', { ...base, requestId: 'r2', relation: 'child' }),
     ).rejects.toThrow('independent');
     expect(core.createTask).not.toHaveBeenCalled();
+  });
+
+  // A session that lost its task can only come back through another one, so the
+  // sessions that may create tasks may also bring a worktree back as one.
+  describe('import_worktree', () => {
+    const sessionId = '240604e8-6d6c-43ce-9178-6d63236f39a9';
+
+    it('passes a validated request to the renderer', async () => {
+      await register('parent');
+      const caller = session('parent');
+      await expect(
+        service.callTool(caller, 'import_worktree', { path: '/repo/.worktrees/task/lost' }),
+      ).resolves.toEqual({ taskId: 'imported', resumedSessionId: null });
+      await service.callTool(caller, 'import_worktree', {
+        path: '/repo/.worktrees/task/lost',
+        sessionId,
+        cleanupOnClose: true,
+      });
+      expect(importWorktree.mock.calls.map(([request]) => request)).toEqual([
+        { creatorTaskId: 'parent', path: '/repo/.worktrees/task/lost', cleanupOnClose: false },
+        {
+          creatorTaskId: 'parent',
+          path: '/repo/.worktrees/task/lost',
+          sessionId,
+          cleanupOnClose: true,
+        },
+      ]);
+    });
+
+    it('is open to page agents', async () => {
+      const pageTask = 'gh-agent-project';
+      await register(pageTask, { gitIsolation: 'none', worktreePath: '/repo', branchName: '' });
+      const capabilities = service.capabilities(pageTask);
+      if (!capabilities) throw new Error('missing capabilities');
+      const caller: SessionCaller = {
+        taskId: pageTask,
+        agentId: 'agent-page',
+        sessionInstanceId: 'instance-page',
+        capabilities,
+      };
+      sessions.push(caller);
+      await expect(
+        service.callTool(caller, 'import_worktree', { path: '/repo/.worktrees/x' }),
+      ).resolves.toMatchObject({ taskId: 'imported' });
+    });
+
+    it('refuses children, disabled orchestration and malformed input', async () => {
+      await register('parent');
+      await register('child', { parentTaskId: 'parent', integrationPolicy: 'review' });
+      const parent = session('parent');
+      const child = session('child', 'child-launch', true);
+      await expect(
+        service.callTool(child, 'import_worktree', { path: '/repo/.worktrees/x' }),
+      ).rejects.toThrow('child session');
+      await expect(service.callTool(parent, 'import_worktree', {})).rejects.toThrow('path');
+      await expect(
+        service.callTool(parent, 'import_worktree', { path: 'relative/dir' }),
+      ).rejects.toThrow('absolute');
+      await expect(
+        service.callTool(parent, 'import_worktree', { path: '/repo/x', sessionId: 'latest' }),
+      ).rejects.toThrow('sessionId');
+      await service.request({ action: 'orchestrationSetting', enabled: false });
+      await expect(
+        service.callTool(parent, 'import_worktree', { path: '/repo/.worktrees/x' }),
+      ).rejects.toThrow('disabled');
+      expect(importWorktree).not.toHaveBeenCalled();
+    });
   });
 
   it('gives no task tools to a checkout task that is not a page agent', async () => {
@@ -987,6 +1062,63 @@ describe('held peer messages and access', () => {
         sessionInstanceId: peer.sessionInstanceId,
       }),
     ).resolves.toMatchObject({ output: 'Hello peer', truncated: false });
+  });
+
+  it('lets a top-level peer read another top-level task diff only after opt-in', async () => {
+    await register('parent');
+    await register('peer');
+    const parent = session('parent');
+    const diff = {
+      files: [{ path: 'a.ts', lines_added: 1, lines_removed: 0, status: 'M', committed: true }],
+      diff: '+x',
+    };
+    mocks.worktreeDiff.mockResolvedValue(diff);
+    await expect(service.callTool(parent, 'get_task_diff', { taskId: 'peer' })).rejects.toThrow(
+      'Peer access',
+    );
+    expect(mocks.worktreeDiff).not.toHaveBeenCalled();
+    policy(true);
+    await expect(service.callTool(parent, 'get_task_diff', { taskId: 'peer' })).resolves.toEqual(
+      diff,
+    );
+    expect(mocks.worktreeDiff).toHaveBeenCalledWith('/external/peer');
+    // Opt-in covers the diff only; status and prompts stay limited to own children.
+    await expect(service.callTool(parent, 'get_task_status', { taskId: 'peer' })).rejects.toThrow(
+      'no longer active',
+    );
+    await expect(
+      service.callTool(parent, 'send_prompt', { taskId: 'peer', prompt: 'hi' }),
+    ).rejects.toThrow('no longer active');
+  });
+
+  it('keeps peer diffs out of other projects, foreign children, checkouts and self', async () => {
+    await register('parent');
+    await register('peer');
+    await register('other', { projectRoot: '/other', projectId: 'other' });
+    await register('foreign-child', { parentTaskId: 'peer' });
+    await register('child', { parentTaskId: 'parent' });
+    await register('checkout', { gitIsolation: 'direct', worktreePath: '/repo' });
+    const parent = session('parent');
+    const child = session('child', 'child-instance', true);
+    const noPeers: SessionCaller = {
+      ...session('peer'),
+      capabilities: { profile: 'ordinary', canCreate: true, peers: false },
+    };
+    policy(true);
+    await expect(service.callTool(parent, 'get_task_diff', { taskId: 'checkout' })).rejects.toThrow(
+      'project checkout',
+    );
+    for (const taskId of ['other', 'foreign-child', 'parent'])
+      await expect(service.callTool(parent, 'get_task_diff', { taskId })).rejects.toThrow(
+        'no longer active',
+      );
+    await expect(service.callTool(noPeers, 'get_task_diff', { taskId: 'parent' })).rejects.toThrow(
+      'Peer access',
+    );
+    await expect(service.callTool(child, 'get_task_diff', { taskId: 'peer' })).rejects.toThrow(
+      'unavailable',
+    );
+    expect(mocks.worktreeDiff).not.toHaveBeenCalled();
   });
 
   it('keeps project page agents out of peer scope', async () => {

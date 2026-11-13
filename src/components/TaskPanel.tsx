@@ -31,6 +31,7 @@ import {
   isTaskCanvasVisible,
   referenceTourCard,
   openCanvasDocument,
+  isTaskPromptInputShown,
 } from '../store/store';
 import { markFeatureHintSeen } from '../store/onboarding';
 import { useFocusRegistration } from '../lib/focus-registration';
@@ -186,6 +187,7 @@ export function TaskPanel(props: TaskPanelProps) {
   let pushSuccessTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(pushSuccessTimer));
   const [diffScrollTarget, setDiffScrollTarget] = createSignal<string | null>(null);
+  const [diffScrollLine, setDiffScrollLine] = createSignal<number | undefined>();
   const [commitList, setCommitList] = createSignal<CommitInfo[]>([]);
   const [selectedCommit, setSelectedCommit] = createSignal<CommitSelection>(null);
   const tour = createChangeTour();
@@ -436,8 +438,9 @@ export function TaskPanel(props: TaskPanelProps) {
   const isGitUnavailable = () => props.task.gitIsolation === 'none' || isLandedTask();
   const [changedFiles, setChangedFiles] = createSignal<ChangedFile[]>([]);
   const changedFileCount = () => changedFiles().length;
-  const openChangedFile = (path: string) => {
+  const openChangedFile = (path: string, line?: number) => {
     setStartTour(false);
+    setDiffScrollLine(line);
     setDiffScrollTarget(path);
   };
   /** File links to a listed file open its diff, in the selection the list shows. */
@@ -448,6 +451,19 @@ export function TaskPanel(props: TaskPanelProps) {
           has: (path) => changedFiles().some((file) => file.path === path),
           open: openChangedFile,
         };
+  /** The diff opens behind the tour, so the tour steps aside; reopening keeps the reader's place. */
+  const tourChangesLink = (): ChangesLink | undefined => {
+    const link = changesLink();
+    return (
+      link && {
+        has: link.has,
+        open: (path, line) => {
+          setUnderstandingOpen(false);
+          link.open(path, line);
+        },
+      }
+    );
+  };
   // Two-column layout kicks in once the main column is wide enough, whether
   // the task fills the window in focus mode or is a widened tile.
   // Hysteresis: enter at >=1080, leave at <1030. A single threshold flickers
@@ -556,7 +572,7 @@ export function TaskPanel(props: TaskPanelProps) {
       autoFocusTimer = setTimeout(() => {
         autoFocusTimer = undefined;
         if (!store.focusedPanel[id] && !panelRef.contains(document.activeElement)) {
-          if (store.showPromptInput && !isAgentChat(props.task, firstAgentId())) {
+          if (isTaskPromptInputShown(props.task) && !isAgentChat(props.task, firstAgentId())) {
             promptRef?.focus();
           } else {
             setTaskFocusedPanel(id, 'ai-terminal');
@@ -782,7 +798,7 @@ export function TaskPanel(props: TaskPanelProps) {
   // question, so the prompt box appears for it even when turned off.
   const promptBoxShown = () =>
     !isAgentChat(props.task, firstAgentId()) &&
-    (store.showPromptInput ||
+    (isTaskPromptInputShown(props.task) ||
       autoSendChildUpdates() ||
       (contextOn() && needsYouNow(props.task) !== ''));
   const promptInputEl = (
@@ -1236,7 +1252,7 @@ export function TaskPanel(props: TaskPanelProps) {
             props.task,
             message,
             promptHandle,
-            store.showPromptInput && !isAgentChat(props.task, firstAgentId()),
+            isTaskPromptInputShown(props.task) && !isAgentChat(props.task, firstAgentId()),
           )
         }
         onUseComposer={(message) =>
@@ -1244,7 +1260,7 @@ export function TaskPanel(props: TaskPanelProps) {
             props.task,
             message,
             promptHandle,
-            store.showPromptInput && !isAgentChat(props.task, firstAgentId()),
+            isTaskPromptInputShown(props.task) && !isAgentChat(props.task, firstAgentId()),
           )
         }
       />
@@ -1334,6 +1350,7 @@ export function TaskPanel(props: TaskPanelProps) {
           tour={tour}
           startTour={startTour()}
           scrollToFile={diffScrollTarget()}
+          scrollToLine={diffScrollLine()}
           taskName={props.task.name}
           worktreePath={props.task.worktreePath}
           coverageReportPath={getProject(props.task.projectId)?.coverageReportPath}
@@ -1342,6 +1359,7 @@ export function TaskPanel(props: TaskPanelProps) {
           baseBranch={diffBaseBranch()}
           onClose={() => {
             setDiffScrollTarget(null);
+            setDiffScrollLine(undefined);
             setStartTour(false);
           }}
           taskId={props.task.id}
@@ -1391,6 +1409,7 @@ export function TaskPanel(props: TaskPanelProps) {
           setUnderstandingOpen(false);
           openCanvasDocument(props.task.id, path);
         }}
+        changes={tourChangesLink()}
         zIndex={1450}
       />
     </div>

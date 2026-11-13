@@ -6,6 +6,7 @@ import { restoreBriefBarFields, restoreTaskBriefRecord } from '../lib/task-brief
 import { restoreTaskAgentPlan } from '../lib/task-plan';
 import { restoreReviewChecks } from '../lib/review-checks';
 import { restoreTaskConfidence } from '../lib/task-confidence';
+import { restoreTaskVisit } from '../lib/task-visit';
 import { restoreTaskFinishItems } from '../lib/finish-items';
 import { restoreReviewDismissed } from '../lib/review-summary';
 import type { PrBabysit } from '../lib/pr-babysit';
@@ -514,6 +515,7 @@ function toPersistedTask(task: Task, agentDefs: AgentDef[], collapsed?: boolean)
     brief: task.brief,
     agentPlan: task.agentPlan,
     confidence: task.confidence,
+    lastVisit: task.lastVisit,
     finishItems: task.finishItems,
     reviewDismissed: task.reviewDismissed,
     reviewModel: task.reviewModel,
@@ -1361,6 +1363,9 @@ export async function loadState(): Promise<void> {
           prBabysit: restoredPrBabysit(pt.prBabysit),
           notes: pt.notes,
           promptDraft: typeof pt.promptDraft === 'string' ? pt.promptDraft : undefined,
+          // An unsent draft stays visible even when the prompt box is turned off.
+          promptInputRevealed:
+            typeof pt.promptDraft === 'string' && pt.promptDraft.trim() !== '' ? true : undefined,
           browserUrl: typeof pt.browserUrl === 'string' ? pt.browserUrl : undefined,
           lastPrompt: pt.lastPrompt,
           promptHistory: restoredPromptHistory(pt.promptHistory),
@@ -1426,6 +1431,7 @@ export async function loadState(): Promise<void> {
           verification: pt.verification,
           verificationRun: restoredVerificationRun(pt.verificationRun),
           lastVerifyPass: restoredVerifyPass(pt.lastVerifyPass),
+          lastVisit: restoreTaskVisit(pt.lastVisit),
           evidence: restoredCheckSuite(pt.evidence),
           brief: restoreTaskBriefRecord(pt.brief),
           agentPlan: restoreTaskAgentPlan(pt.agentPlan),
@@ -1516,6 +1522,9 @@ export async function loadState(): Promise<void> {
           shellAgentIds: [],
           notes: pt.notes,
           promptDraft: typeof pt.promptDraft === 'string' ? pt.promptDraft : undefined,
+          // An unsent draft stays visible even when the prompt box is turned off.
+          promptInputRevealed:
+            typeof pt.promptDraft === 'string' && pt.promptDraft.trim() !== '' ? true : undefined,
           browserUrl: typeof pt.browserUrl === 'string' ? pt.browserUrl : undefined,
           lastPrompt: pt.lastPrompt,
           promptHistory: restoredPromptHistory(pt.promptHistory),
@@ -1591,6 +1600,7 @@ export async function loadState(): Promise<void> {
           verification: pt.verification,
           verificationRun: restoredVerificationRun(pt.verificationRun),
           lastVerifyPass: restoredVerifyPass(pt.lastVerifyPass),
+          lastVisit: restoreTaskVisit(pt.lastVisit),
           evidence: restoredCheckSuite(pt.evidence),
           brief: restoreTaskBriefRecord(pt.brief),
           agentPlan: restoreTaskAgentPlan(pt.agentPlan),

@@ -21,6 +21,7 @@ import { assignFreshSessionId } from './session-ids';
 import { effectiveAgentId } from './agent-select';
 import { saveState } from './persistence';
 import { MAX_PROMPT_HISTORY, promptHistoryOf } from '../lib/prompt-history';
+import type { TeleportTarget } from '../lib/claude-session-url';
 import { setTaskFocusedPanel, shellPanelId } from './focused-panel';
 import { getProject, getProjectPath, getProjectBranchPrefix, isProjectMissing } from './projects';
 import {
@@ -194,7 +195,7 @@ function initTaskInStore(
       // the second pane's — so pane one comes back with the wrong conversation.
       // A teleported pane is the exception: `--teleport` picks the session; so is
       // a resumed one, which already names the session it reopens.
-      if (!task.teleportSessionId && !agent.resumed)
+      if (!task.teleport && !agent.resumed)
         assignFreshSessionId(s, taskId, agent.id, agent.def.command);
       s.taskOrder.push(taskId);
       if (opts.activate) {
@@ -206,7 +207,7 @@ function initTaskInStore(
         if (s.boardView) s.boardPeek = true;
       }
       s.lastProjectId = task.projectId;
-      if (task.teleportSessionId) s.lastTeleportProjectId = task.projectId;
+      if (task.teleport) s.lastTeleportProjectId = task.projectId;
       if (opts.agentDef) s.lastAgentId = opts.agentDef.id;
     }),
   );
@@ -287,7 +288,7 @@ export interface CreateTaskOptions {
   /** Check out this open pull request instead of branching from baseBranch. */
   pullRequestNumber?: number;
   /** Claude web session to `--teleport` into on the agent's first launch. */
-  teleportSessionId?: string;
+  teleport?: TeleportTarget;
   skipPermissions?: boolean;
   dockerMode?: boolean;
   dockerSource?: DockerSource;
@@ -431,9 +432,9 @@ export async function createTask(opts: CreateTaskOptions): Promise<string> {
     }),
     initialPrompt: initialPrompt ?? undefined,
     savedInitialPrompt: initialPrompt ?? undefined,
-    teleportSessionId: opts.teleportSessionId,
+    teleport: opts.teleport,
     // `--teleport` is a terminal launch flag; the chat view's launch would drop it.
-    ...(opts.teleportSessionId && { mainAgentView: 'terminal' as const }),
+    ...(opts.teleport && { mainAgentView: 'terminal' as const }),
     skipPermissions: skipPermissions ?? undefined,
     dockerMode: dockerMode ?? undefined,
     dockerSource: dockerSource ?? undefined,
@@ -728,6 +729,8 @@ export async function mergeTask(
     cleanup?: boolean;
     /** Set the base checkout's uncommitted changes aside instead of refusing. */
     allowDirtyTarget?: boolean;
+    /** Merge here instead of the task's base, e.g. a sub-task into main rather than its parent. */
+    baseBranch?: string;
   },
 ): Promise<void> {
   // Precondition failures throw so the merge dialog can say why nothing
@@ -764,7 +767,7 @@ export async function mergeTask(
     projectRoot,
     branchName,
     worktreePath: task.worktreePath,
-    baseBranch: task.baseBranch,
+    baseBranch: options?.baseBranch ?? task.baseBranch,
     squash: options?.squash ?? false,
     message: options?.message,
     cleanup,

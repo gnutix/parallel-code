@@ -1,5 +1,6 @@
 import type { PrBabysit } from '../lib/pr-babysit';
 import type { ProjectIconId } from '../lib/project-icon';
+import type { TeleportTarget } from '../lib/claude-session-url';
 import type {
   CompletionRecord,
   SubtaskVerification,
@@ -30,6 +31,7 @@ import type { BriefBarFields, TaskBriefRecord } from '../lib/task-brief';
 import type { PlanStep } from '../../electron/shared/agent-plan';
 import type { CloseSuggestion } from '../../electron/shared/close-suggestion';
 import type { TaskConfidence } from '../lib/task-confidence';
+import type { TaskVisit } from '../lib/task-visit';
 import type { TaskFinishItems } from '../lib/finish-items';
 import type { ReviewDismissal } from '../lib/review-summary';
 import type { ReviewModelSettings } from '../lib/task-review';
@@ -300,9 +302,9 @@ export interface Task {
    *  whichever session in the worktree happens to be newest. */
   agentSessionIds?: Record<string, string>;
   /** Claude web session the first pane teleports on its first launch
-   *  (`claude --teleport <id>`); see buildTaskAgentArgs. Not persisted: after a
-   *  restart the pane resumes instead. */
-  teleportSessionId?: string;
+   *  (`claude --teleport [id]`; no id lets the user pick one in the CLI); see
+   *  buildTaskAgentArgs. Not persisted: after a restart the pane resumes instead. */
+  teleport?: TeleportTarget;
   selectedAgentId?: string;
   /** Layout for a task's AI terminals when it has more than one agent.
    *  'split' (default) tiles them side by side; 'tabs' shows only the selected
@@ -392,6 +394,9 @@ export interface Task {
    *  restart (app or machine) doesn't discard what the user typed but never
    *  sent. Cleared on send. */
   promptDraft?: string;
+  /** Shows the prompt box for a staged draft while the user keeps it hidden
+   *  in Settings; cleared on send. Restored from a non-empty draft. */
+  promptInputRevealed?: boolean;
   terminalInputPending?: boolean;
   terminalInputPendingFromQuestion?: boolean;
   delegationParent?: boolean;
@@ -436,6 +441,8 @@ export interface Task {
   codeFingerprint?: { fingerprint: string; at: number };
   /** Latest rating: from a review, or published by the agent through `confidence_publish`. */
   confidence?: TaskConfidence;
+  /** When the user last had this task open, the baseline for "since you looked". */
+  lastVisit?: TaskVisit;
   /** Loose ends the agent recorded through `finish_items_publish`, shown in the Finish dialog. */
   finishItems?: TaskFinishItems;
   /** Runtime-only: a review is running, or the last one failed. */
@@ -561,6 +568,8 @@ export interface PersistedTask {
   agentPlan?: unknown;
   /** Validated on load. */
   confidence?: unknown;
+  /** Validated on load. */
+  lastVisit?: unknown;
   /** Validated on load. */
   finishItems?: unknown;
   /** Validated on load. */

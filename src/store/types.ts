@@ -630,6 +630,7 @@ export interface PersistedState {
   modelTaskNames?: boolean;
   taskNameModel?: TaskNameModelId;
   taskBriefs?: boolean;
+  taskSideCollapsed?: boolean;
   briefBarFields?: BriefBarFields;
   briefModel?: BriefModelId;
   reviewGuidance?: string;
@@ -792,6 +793,8 @@ export interface AppStore {
   taskNameModel: TaskNameModelId;
   /** Opt-in: write a task brief after each agent turn. */
   taskBriefs: boolean;
+  /** The side column of a two-column task (changed files, notes, shells) is hidden. */
+  taskSideCollapsed: boolean;
   briefBarFields: BriefBarFields;
   briefModel: BriefModelId;
   /** The user's own notes for the task reviewer, added to its instructions. */

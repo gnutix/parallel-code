@@ -1076,11 +1076,14 @@ describe('FinishDialog with no work on the branch', () => {
     expect(document.querySelector('[data-testid="target-uncommitted"]')).toBeNull();
     // The quiet notice says it all; no warning that the merge has nothing to bring in.
     expect(document.body.textContent).not.toContain('Nothing to merge:');
-    // An empty branch has nothing to push or to open a PR with.
+    // An empty branch has nothing to push or to open a PR with. Push stays in
+    // the footer so the Tab order never shifts, but does nothing and says why.
     expect(document.querySelector('section[aria-label="Pull request"]')).toBeNull();
-    expect(
-      [...document.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Push'),
-    ).toBe(false);
+    const pushButton = [...document.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Push',
+    );
+    expect(pushButton?.getAttribute('aria-disabled')).toBe('true');
+    expect(pushButton?.title).toBe('Nothing on this branch to push.');
     expect(document.querySelector('[data-testid="footer-note"]')?.textContent).toBe('');
     expect(confirmButton()?.textContent).toBe('Close task');
     expect(confirmButton()?.disabled).toBe(false);

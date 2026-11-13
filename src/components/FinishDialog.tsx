@@ -254,6 +254,7 @@ export function FinishDialog(props: FinishDialogProps) {
     const blocker = pushBlocker();
     if (blocker) return blocker;
     if (pushFirst() || offerPush()) return undefined;
+    if (merge.nothingToMerge()) return 'Nothing on this branch to push.';
     if (landed()) return 'Already merged.';
     if (pr.mode() === 'pr' && !pr.pr()) return 'Checking the pull request…';
     // .error first: reading an errored resource throws.

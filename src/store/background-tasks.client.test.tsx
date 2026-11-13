@@ -363,6 +363,7 @@ it('offers the action and a manual return in the task header', () => {
           isActive={store.activeTaskId === 'one'}
           onClose={() => undefined}
           onFinish={() => undefined}
+          onCreatePr={() => undefined}
           pushing={false}
           pushSuccess={false}
           onTitleEditRef={() => undefined}
@@ -803,6 +804,7 @@ it('offers the CI snooze in the Later menu and shows it in the header', () => {
           isActive={store.activeTaskId === 'one'}
           onClose={() => undefined}
           onFinish={() => undefined}
+          onCreatePr={() => undefined}
           pushing={false}
           pushSuccess={false}
           onTitleEditRef={() => undefined}

@@ -469,6 +469,7 @@ function toPersistedTask(task: Task, agentDefs: AgentDef[], collapsed?: boolean)
     savedSelectedAgentIndex: task.savedSelectedAgentIndex,
     savedAgentSessionIds: task.savedAgentSessionIds,
     savedPromptedAgentIndexes: task.savedPromptedAgentIndexes,
+    worktreeSuspended: task.worktreeSuspended,
     planFileName: task.planFileName,
     canvasTabs: task.canvasTabs,
     canvasActiveTab: task.canvasActiveTab,
@@ -917,6 +918,8 @@ export async function loadState(): Promise<void> {
     p.agentEnv = sanitizeEnvVars(p.agentEnv);
     p.worktreeSetupScript = sanitizeWorktreeScript(p.worktreeSetupScript);
     p.worktreeTeardownScript = sanitizeWorktreeScript(p.worktreeTeardownScript);
+    p.worktreeSuspendScript = sanitizeWorktreeScript(p.worktreeSuspendScript);
+    p.worktreeResumeScript = sanitizeWorktreeScript(p.worktreeResumeScript);
     p.worktreeIncludes = sanitizeWorktreeIncludes(p.worktreeIncludes);
     // Background evidence builds and the evidence review model are gone; drop
     // their old settings. Check suggestions use the review model instead.
@@ -1513,6 +1516,7 @@ export async function loadState(): Promise<void> {
           savedInitialPrompt: pt.savedInitialPrompt,
           savedSelectedAgentIndex: validAgentIndex(pt.savedSelectedAgentIndex),
           savedPromptedAgentIndexes: validPromptedAgentIndexes(pt.savedPromptedAgentIndexes),
+          worktreeSuspended: pt.worktreeSuspended === true || undefined,
           planFileName: pt.planFileName,
           ...restoredCanvas(pt),
           ...restoreTaskMindMap(pt, unreadableMindMaps),

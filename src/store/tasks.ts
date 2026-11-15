@@ -33,7 +33,10 @@ import {
 import {
   forgetSetupShells,
   reportTeardownWarning,
+  resumeScriptFor,
+  runWorktreeLifecycleScript,
   setPendingSetupScript,
+  suspendScriptFor,
   teardownScriptFor,
 } from './worktree-setup';
 import {
@@ -1206,11 +1209,15 @@ export async function collapseTask(taskId: string): Promise<void> {
     allIds.map((id) => invoke(IPC.KillAgent, { agentId: id }).catch(console.error)),
   );
   for (const id of allIds) clearAgentActivity(id);
+  // With the agents stopped, nothing in the worktree needs what the task
+  // started (a docker compose stack, a dev server): the project may stop it.
+  const suspendScript = store.tasks[taskId] ? suspendScriptFor(task) : undefined;
 
   setStore(
     produce((s) => {
       if (!s.tasks[taskId]) return;
       s.tasks[taskId].collapsed = true;
+      if (suspendScript) s.tasks[taskId].worktreeSuspended = true;
       s.tasks[taskId].snoozedUntil = undefined;
       s.tasks[taskId].snoozedUntilCi = undefined;
       s.tasks[taskId].savedAgentDef = agentDefs[0];
@@ -1264,6 +1271,7 @@ export async function collapseTask(taskId: string): Promise<void> {
     }),
   );
 
+  if (suspendScript) runWorktreeLifecycleScript('suspend', task, suspendScript);
   rescheduleTaskStatusPolling();
 }
 
@@ -1285,11 +1293,15 @@ export function uncollapseTask(taskId: string, options: { activate?: boolean } =
   }));
   const selectedAgentIndex = task.savedSelectedAgentIndex ?? 0;
   const promptedAgentIndexes = task.savedPromptedAgentIndexes ?? [];
+  // Only a task whose suspend script ran is resumed, even after a restart, so
+  // a task minimized before the scripts were set up is left as it was.
+  const resumeScript = task.worktreeSuspended ? resumeScriptFor(task) : undefined;
 
   setStore(
     produce((s) => {
       const t = s.tasks[taskId];
       t.collapsed = false;
+      t.worktreeSuspended = undefined;
       t.snoozedUntil = undefined;
       s.collapsedTaskOrder = s.collapsedTaskOrder.filter((id) => id !== taskId);
       s.taskOrder.push(taskId);
@@ -1336,6 +1348,7 @@ export function uncollapseTask(taskId: string, options: { activate?: boolean } =
     }),
   );
 
+  if (resumeScript) runWorktreeLifecycleScript('resume', task, resumeScript);
   if (restoredAgents.length > 0) {
     for (const { id } of restoredAgents) markAgentSpawned(id);
     rescheduleTaskStatusPolling();

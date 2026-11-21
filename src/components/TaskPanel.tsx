@@ -545,19 +545,16 @@ export function TaskPanel(props: TaskPanelProps) {
   // so each task reconciles its own focus, whichever task's pill hid the
   // column, and also when it widens into the split with the column hidden.
   createEffect(
-    on(
-      sideHidden,
-      (hidden) => {
-        if (!hidden) return;
-        const panel = store.focusedPanel[props.task.id];
-        if (!panel || !isSideColumnPanel(panel)) return;
-        if (props.isActive) {
-          setTaskFocusedPanel(props.task.id, 'ai-terminal');
-        } else {
-          recordTaskFocusedPanel(props.task.id, 'ai-terminal');
-        }
-      },
-    ),
+    on(sideHidden, (hidden) => {
+      if (!hidden) return;
+      const panel = store.focusedPanel[props.task.id];
+      if (!panel || !isSideColumnPanel(panel)) return;
+      if (props.isActive) {
+        setTaskFocusedPanel(props.task.id, 'ai-terminal');
+      } else {
+        recordTaskFocusedPanel(props.task.id, 'ai-terminal');
+      }
+    }),
   );
   const toggleSideColumn = () => setTaskSideCollapsed(!store.taskSideCollapsed);
 

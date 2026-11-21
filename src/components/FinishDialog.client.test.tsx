@@ -789,11 +789,16 @@ describe('FinishDialog base sync', () => {
     mockInvoke((channel) => {
       if (channel === IPC.GetBranchLog) return '';
       if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 4 };
-      return { current_branch: 'task/parent', has_committed_changes: false };
+      // Uncommitted work: a branch with none at all offers Close task instead.
+      return {
+        current_branch: 'task/parent',
+        has_committed_changes: false,
+        has_uncommitted_changes: true,
+      };
     });
     mount({ task: task({ baseBranch: 'main' }) });
     await flush();
-    expect(document.body.textContent).toContain('Nothing on this branch');
+    expect(document.body.textContent).toContain('Nothing to merge');
     expect(document.body.textContent).not.toContain('new commits');
     expect(button('Update branch')).toBeUndefined();
   });
@@ -1098,14 +1103,12 @@ describe('FinishDialog with no work on the branch', () => {
     expect(document.querySelector('[data-testid="target-uncommitted"]')).toBeNull();
     // The quiet notice says it all; no warning that the merge has nothing to bring in.
     expect(document.body.textContent).not.toContain('Nothing to merge:');
-    // An empty branch has nothing to push or to open a PR with. Push stays in
-    // the footer so the Tab order never shifts, but does nothing and says why.
+    // An empty branch has nothing to push or to open a PR with.
     expect(document.querySelector('section[aria-label="Pull request"]')).toBeNull();
-    const pushButton = [...document.querySelectorAll('button')].find(
-      (b) => b.textContent?.trim() === 'Push',
-    );
-    expect(pushButton?.getAttribute('aria-disabled')).toBe('true');
-    expect(pushButton?.title).toBe('Nothing on this branch to push.');
+    expect(button('Push')?.getAttribute('aria-disabled')).toBe('true');
+    expect(button('Push')?.getAttribute('title')).toBe('Nothing to push.');
+    button('Push')?.click();
+    expect(pushTask).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="footer-note"]')?.textContent).toBe('');
     expect(confirmButton()?.textContent).toBe('Close task');
     expect(confirmButton()?.disabled).toBe(false);

@@ -15,11 +15,13 @@ import {
   CANVAS_INSTRUCTIONS,
   TOUR_TOOLS,
   CONFIDENCE_TOOLS,
+  CARD_TOOLS,
   PR_DRAFT_TOOLS,
   FINISH_ITEMS_TOOLS,
   GITHUB_LIST_TOOLS,
   hasCanvasTools,
   APP_TASK_INSTRUCTIONS,
+  CONFIDENCE_INSTRUCTIONS,
   serverInstructions,
   GITHUB_AGENT_INSTRUCTIONS,
   sessionInstructions,
@@ -36,6 +38,7 @@ describe('selectTools — role-based tool list', () => {
       ...CANVAS_VIEW_TOOLS,
       ...TOUR_TOOLS,
       ...CONFIDENCE_TOOLS,
+      ...CARD_TOOLS,
       ...PR_DRAFT_TOOLS,
     ]);
     expect(tools.map((t: ToolDef) => t.name)).toStrictEqual([
@@ -48,6 +51,11 @@ describe('selectTools — role-based tool list', () => {
       'canvas_open',
       'tour_publish',
       'confidence_publish',
+      'card_list',
+      'card_publish',
+      'card_config_read',
+      'card_config_save',
+      'card_config_remove',
       'pr_draft_publish',
     ]);
   });
@@ -61,6 +69,7 @@ describe('selectTools — role-based tool list', () => {
       ...CANVAS_VIEW_TOOLS,
       ...TOUR_TOOLS,
       ...CONFIDENCE_TOOLS,
+      ...CARD_TOOLS,
     ]);
   });
 
@@ -159,6 +168,7 @@ it('ordinary canvas sessions advertise only map tools', () => {
     ...CANVAS_VIEW_TOOLS,
     ...TOUR_TOOLS,
     ...CONFIDENCE_TOOLS,
+    ...CARD_TOOLS,
     ...PR_DRAFT_TOOLS,
     ...FINISH_ITEMS_TOOLS,
   ]);
@@ -171,6 +181,7 @@ it('offers github_list_publish only to the GitHub page agent', () => {
     ...CANVAS_VIEW_TOOLS,
     ...TOUR_TOOLS,
     ...CONFIDENCE_TOOLS,
+    ...CARD_TOOLS,
     ...GITHUB_LIST_TOOLS,
   ]);
 });
@@ -191,6 +202,7 @@ it('gives a page agent only independent task creation and worktree import beside
       ...CANVAS_VIEW_TOOLS,
       ...TOUR_TOOLS,
       ...CONFIDENCE_TOOLS,
+      ...CARD_TOOLS,
       ...GITHUB_LIST_TOOLS,
     ].map((tool) => tool.name),
     'create_task',
@@ -280,6 +292,11 @@ describe('session capability tool sets', () => {
     'canvas_open',
     'tour_publish',
     'confidence_publish',
+    'card_list',
+    'card_publish',
+    'card_config_read',
+    'card_config_save',
+    'card_config_remove',
     'pr_draft_publish',
   ];
   // Only sessions that reach the Finish dialog record loose ends for it.
@@ -458,6 +475,24 @@ describe('serverInstructions', () => {
     expect(
       serverInstructions({ taskId: 'task', coordinatorId: '', canvasOnly: true }),
     ).not.toContain(GITHUB_AGENT_INSTRUCTIONS);
+  });
+
+  it('tells task agents to publish ratings, right after the role and app guidance', () => {
+    // Clients defer MCP tool descriptions, so only the instructions reach the agent.
+    // Not held to CLIENT_LIMIT: role and app guidance already fill it for a top-level
+    // task with peers, and current Claude Code delivers instructions well past it.
+    expect(CONFIDENCE_INSTRUCTIONS).toContain('confidence_publish');
+    for (const profile of ['ordinary', 'child-review', 'child-automatic'] as const) {
+      const sessionCapabilities = { profile, canCreate: true, peers: true };
+      const text = serverInstructions({
+        taskId: 'task',
+        coordinatorId: '',
+        canvasOnly: false,
+        sessionCapabilities,
+      });
+      const essential = `${sessionInstructions(sessionCapabilities)}\n\n${APP_TASK_INSTRUCTIONS}`;
+      expect(text.startsWith(`${essential}\n\n${CONFIDENCE_INSTRUCTIONS}`)).toBe(true);
+    }
   });
 
   it('still includes app and canvas guidance', () => {

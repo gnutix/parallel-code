@@ -74,7 +74,7 @@ vi.mock('./taskStatus', () => ({
   isAutoTrustSettling: () => status.autoTrust,
   isClaudeAgent: () => status.claude,
 }));
-vi.mock('./sidebar-attention', () => ({ taskNeedsYou: () => status.needsYou }));
+vi.mock('./sidebar-attention', () => ({ hasTrayEntry: () => status.needsYou }));
 vi.mock('../components/prompt-autosend-readiness', () => ({
   isScreenBlockingAutoSend: () => status.screenBlocked,
 }));

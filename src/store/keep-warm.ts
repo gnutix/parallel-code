@@ -5,7 +5,7 @@ import { getAgentHookStatus } from './agentHookStatus';
 import { isAgentChat } from './agent-chat';
 import { isAgentSuspended } from './agent-suspend';
 import { isLandedTaskState } from './landing';
-import { taskNeedsYou } from './sidebar-attention';
+import { hasTrayEntry } from './sidebar-attention';
 import {
   getAgentLastOutputAt,
   getAgentOutputTail,
@@ -69,7 +69,7 @@ function needsUser(taskId: string, agentId: string): boolean {
     attention === 'needs_input' ||
     attention === 'error' ||
     attention === 'review' ||
-    taskNeedsYou(taskId) ||
+    hasTrayEntry(taskId) ||
     isAutoTrustSettling(agentId) ||
     isScreenBlockingAutoSend(getAgentOutputTail(agentId))
   );

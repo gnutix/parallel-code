@@ -51,6 +51,8 @@ import { Sidebar } from './components/Sidebar';
 import { TilingLayout } from './components/TilingLayout';
 import { HelpDialog } from './components/HelpDialog';
 import { IdeaDialog, toggleIdeaDialog } from './components/IdeaDialog';
+import { PromptPeek } from './components/PromptPeek';
+import { syncAttentionBadge } from './lib/attention-badge';
 import { TaskSwitcher } from './components/TaskSwitcher';
 import { SettingsDialog } from './components/SettingsDialog';
 import { WorkspaceControls } from './components/WorkspaceControls';
@@ -59,10 +61,13 @@ import { TaskBoardControls } from './components/TaskBoardControls';
 import { FocusModeTaskIndicators } from './components/FocusModeTaskIndicators';
 import { UsageStatusBar } from './components/UsageStatusBar';
 import { WelcomeScreen } from './components/WelcomeScreen';
+import { CardChangeRequest } from './components/cards/CardChangeRequest';
+import { CardsOffer } from './components/cards/CardsOffer';
 import { linkButtonStyle, theme } from './lib/theme';
 import * as log from './lib/log';
 import {
   store,
+  waitingCardChanges,
   loadAgents,
   loadState,
   isStateLoaded,
@@ -153,7 +158,7 @@ import { resetForNewMatch } from './arena/store';
 import { startDesktopNotificationWatcher } from './store/desktopNotifications';
 import { startSuperProductivitySync, startSpOpenListener } from './store/store';
 import { isTaskBackgrounded, startBackgroundTaskWatcher } from './store/background-tasks';
-import { startTaskBriefWatcher } from './store/task-brief';
+import { startTurnWatcher } from './store/turn-watcher';
 import { startKeepWarm } from './store/keep-warm';
 import { showPlanTasks, startKanbanAutomation } from './store/kanban';
 import { startPrChecksSubscription } from './store/pr-checks';
@@ -379,6 +384,8 @@ function App() {
 
     setWindowState({ ...geometry, maximized });
   };
+
+  syncAttentionBadge();
 
   // Re-derive effective theme whenever OS dark mode or appearance mode/slots change
   createEffect(() => {
@@ -657,7 +664,7 @@ function App() {
     );
     const stopSpOpenListener = startSpOpenListener();
     const stopBackgroundTaskWatcher = startBackgroundTaskWatcher();
-    const stopTaskBriefWatcher = startTaskBriefWatcher();
+    const stopTurnWatcher = startTurnWatcher();
     const stopKeepWarm = startKeepWarm();
     const stopKanbanAutomation = startKanbanAutomation();
     const stopPrChecksSubscription = startPrChecksSubscription();
@@ -920,7 +927,7 @@ function App() {
       stopSuperProductivitySync();
       stopSpOpenListener();
       stopBackgroundTaskWatcher();
-      stopTaskBriefWatcher();
+      stopTurnWatcher();
       stopKeepWarm();
       stopKanbanAutomation();
       stopPrChecksSubscription();
@@ -1078,6 +1085,22 @@ function App() {
             </button>
           </div>
         </Show>
+        <Show
+          when={
+            !bare() &&
+            store.keybindingMigrationDismissed &&
+            store.cardsOfferPending &&
+            store.showCards &&
+            // An agent's question takes the same place, and it is waiting on the answer.
+            waitingCardChanges().length === 0
+          }
+        >
+          <CardsOffer />
+        </Show>
+        {/* Waits for the shortcut notice, which sits in the same place, as the offer does. */}
+        <Show when={!bare() && store.keybindingMigrationDismissed}>
+          <CardChangeRequest />
+        </Show>
         <Show when={welcome()}>
           <WelcomeScreen />
         </Show>
@@ -1119,6 +1142,7 @@ function App() {
           <UsageStatusBar />
         </Show>
         <IdeaDialog />
+        <PromptPeek />
         <HelpDialog open={store.showHelpDialog} onClose={() => toggleHelpDialog(false)} />
         <TaskSwitcher
           open={taskSwitcherOpen()}

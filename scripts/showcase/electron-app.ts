@@ -30,7 +30,15 @@ export const VIDEO_SIZE = {
 export type ShowcaseApp = {
   app: ElectronApplication;
   page: Page;
+  /** The profile's saved session, for checks of what survives a restart. */
+  statePath: string;
   close: () => Promise<void>;
+  /**
+   * Ends this run, by a normal quit or by killing the main process as a crash
+   * would, and starts the app again on the same profile and workspace.
+   * `between` runs while no app is running, to inspect what the end left behind.
+   */
+  restart: (how: 'quit' | 'kill', between?: () => void) => Promise<ShowcaseApp>;
 };
 
 // An allowlist rather than all of process.env: the parent shell can carry API
@@ -38,9 +46,15 @@ export type ShowcaseApp = {
 // point the app back at real sessions and usage data despite the fake HOME.
 const PROXY_ENV = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
 // Proxies included: behind one, a real agent cannot reach its API without them.
+// SHOWCASE_WINDOWED=1 opens a real window with the GPU, to measure rendering
+// as a desktop does; it needs the display and a GPU, so not in a sandbox or CI.
+const WINDOWED = process.env.SHOWCASE_WINDOWED === '1';
+const DISPLAY_ENV = ['DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'XAUTHORITY'];
+
 const PASSED_ENV = [
   ...['PATH', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'TMPDIR'],
   ...PROXY_ENV.flatMap((name) => [name, name.toLowerCase()]),
+  ...(WINDOWED ? DISPLAY_ENV : []),
 ];
 
 // The agent CLIs the app offers (electron/ipc/agents.ts). A fake HOME hides
@@ -167,14 +181,59 @@ const seedClaudeLogin = (home: string, repo: string): void => {
     projects: { [repo]: { hasTrustDialogAccepted: true } },
   };
   fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify(settings));
-  // Spinner tips are noise in recordings.
+  // Spinner tips are noise in recordings. Without a default mode a fresh login
+  // starts in auto mode, which never asks permission, so scenes could not show
+  // the question; Claude Code may still offer auto mode at start.
   fs.writeFileSync(
     path.join(home, '.claude', 'settings.json'),
-    JSON.stringify({ spinnerTipsEnabled: false }),
+    JSON.stringify({ spinnerTipsEnabled: false, permissions: { defaultMode: 'default' } }),
   );
 };
 
-const showcaseEnv = (home: string, blockedAgentsBin: string): Record<string, string> => ({
+// Codex renews an ageing ChatGPT login, and a renewal in the copy could leave
+// the real login with a spent token. Copy only a recently renewed one.
+// shortcut: a guessed margin; read Codex's renewal interval if this ever trips.
+const CODEX_LOGIN_MAX_AGE_MS = 6 * 24 * 60 * 60_000;
+
+/**
+ * Lets an opted-in Codex start: copies only its login file into the throwaway
+ * home and trusts the demo repository, whose worktrees share its trust.
+ */
+const seedCodexLogin = (home: string, repo: string): void => {
+  const source = path.join(os.homedir(), '.codex', 'auth.json');
+  let refreshedAt = NaN;
+  try {
+    const login = JSON.parse(fs.readFileSync(source, 'utf8')) as { last_refresh?: unknown };
+    refreshedAt = Date.parse(String(login.last_refresh ?? ''));
+  } catch {
+    // The parse error would quote part of the file, tokens included.
+    throw new Error('realAgents: could not read the Codex login in ~/.codex/auth.json');
+  }
+  if (!(Date.now() - refreshedAt < CODEX_LOGIN_MAX_AGE_MS)) {
+    throw new Error(
+      'realAgents: the Codex login was not renewed in the last 6 days (or is no ChatGPT login); run `codex` once',
+    );
+  }
+  const target = path.join(home, '.codex', 'auth.json');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(source, target);
+  fs.chmodSync(target, 0o600);
+  // As for Claude: close() deletes the home, this covers an exit without it.
+  process.once('exit', () => fs.rmSync(target, { force: true }));
+  fs.writeFileSync(
+    path.join(home, '.codex', 'config.toml'),
+    `[projects.${JSON.stringify(repo)}]\ntrust_level = "trusted"\n`,
+  );
+};
+
+// Only real agents are worth recording for the status replay tests (sessions/README.md).
+const RECORD_SESSIONS_ENV = 'PARALLEL_CODE_RECORD_SESSIONS';
+
+const showcaseEnv = (
+  home: string,
+  blockedAgentsBin: string,
+  realAgents: RealAgent[],
+): Record<string, string> => ({
   ...Object.fromEntries(
     PASSED_ENV.flatMap((name) => {
       const value = process.env[name];
@@ -184,6 +243,9 @@ const showcaseEnv = (home: string, blockedAgentsBin: string): Record<string, str
   PATH: [blockedAgentsBin, process.env.PATH].filter(Boolean).join(path.delimiter),
   HOME: home,
   XDG_CONFIG_HOME: path.join(home, '.config'),
+  ...(realAgents.length > 0 && process.env[RECORD_SESSIONS_ENV]
+    ? { [RECORD_SESSIONS_ENV]: process.env[RECORD_SESSIONS_ENV] }
+    : {}),
 });
 
 const startApp = async (page: Page, app: ElectronApplication): Promise<void> => {
@@ -199,7 +261,7 @@ const startApp = async (page: Page, app: ElectronApplication): Promise<void> => 
 // A fixed, short path: the app shows worktree paths, and a random temp name
 // would end up in every screenshot. The marker proves a leftover is ours, and
 // holds the pid of the run that owns it.
-const DEMO_DIR = path.join(os.tmpdir(), 'pc-demo');
+export const DEMO_DIR = path.join(os.tmpdir(), 'pc-demo');
 const DEMO_MARKER = '.parallel-code-showcase';
 
 const isAlive = (pid: number): boolean => {
@@ -263,45 +325,95 @@ export const launchShowcaseApp = async (
     seedShellRc(home, blockedAgentsBin);
     const repo = seedDemoWorkspace(dir, home, options);
     if (options.realAgents?.includes('claude')) seedClaudeLogin(home, repo);
-    app = await _electron.launch({
-      executablePath: path.join(REPO_ROOT, 'node_modules', 'electron', 'dist', 'electron'),
-      args: [
-        '--no-sandbox',
-        // Offscreen rendering: no window on the desktop, and no GPU needed. A
-        // windowed run crashes where the GPU device is unavailable (sandboxes, CI).
-        '--ozone-platform=headless',
-        '--disable-gpu',
-        ...recorderLaunchArgs(WINDOW.deviceScaleFactor),
-        path.join(REPO_ROOT, 'dist-electron', 'main.js'),
-      ],
-      cwd: REPO_ROOT,
-      env: showcaseEnv(home, blockedAgentsBin),
-    });
-    const page = await app.firstWindow();
-    await startApp(page, app);
-    const started = app;
-    return {
-      app: started,
-      page,
-      close: async () => {
-        // Headless GTK cannot show the running-terminals confirmation dialog.
-        // Stop this isolated showcase's terminals before requesting a normal quit.
-        await page.evaluate(() =>
-          (
-            window as unknown as {
-              electron: { ipcRenderer: { invoke: (channel: string) => Promise<unknown> } };
-            }
-          ).electron.ipcRenderer.invoke('kill_all_agents'),
-        );
-        await started.close();
-        removeDir();
-      },
-    };
+    if (options.realAgents?.includes('codex')) seedCodexLogin(home, repo);
+    const env = showcaseEnv(home, blockedAgentsBin, options.realAgents ?? []);
+    app = await launchElectron(env);
+    return await runHandle({ app, env, statePath: statePathIn(home), removeDir });
   } catch (error) {
     await app?.close();
     removeDir();
     throw error;
   }
+};
+
+// The seed writes the session where the unpackaged app reads it (Electron-dev).
+const statePathIn = (home: string): string =>
+  path.join(home, '.config', 'Electron-dev', 'state.json');
+
+const launchElectron = (env: Record<string, string>): Promise<ElectronApplication> =>
+  _electron.launch({
+    executablePath: path.join(REPO_ROOT, 'node_modules', 'electron', 'dist', 'electron'),
+    args: [
+      '--no-sandbox',
+      // Offscreen rendering: no window on the desktop, and no GPU needed. A
+      // windowed run crashes where the GPU device is unavailable (sandboxes, CI).
+      ...(WINDOWED ? [] : ['--ozone-platform=headless', '--disable-gpu']),
+      ...recorderLaunchArgs(WINDOW.deviceScaleFactor),
+      path.join(REPO_ROOT, 'dist-electron', 'main.js'),
+    ],
+    cwd: REPO_ROOT,
+    env,
+  });
+
+type RunContext = {
+  app: ElectronApplication;
+  env: Record<string, string>;
+  statePath: string;
+  removeDir: () => void;
+};
+
+// Headless GTK cannot show the running-terminals confirmation dialog, so a
+// normal quit stops this isolated run's terminals first.
+const killAllAgents = (page: Page): Promise<unknown> =>
+  page.evaluate(() =>
+    (
+      window as unknown as {
+        electron: { ipcRenderer: { invoke: (channel: string) => Promise<unknown> } };
+      }
+    ).electron.ipcRenderer.invoke('kill_all_agents'),
+  );
+
+/** Kills the main process without letting it save or clean up, as a crash would. */
+const crash = async (app: ElectronApplication): Promise<void> => {
+  const main = app.process();
+  if (main.exitCode !== null || main.signalCode !== null) return;
+  const exited = new Promise((resolve) => main.once('exit', resolve));
+  main.kill('SIGKILL');
+  await exited;
+};
+
+const runHandle = async (context: RunContext): Promise<ShowcaseApp> => {
+  const { app, env, statePath, removeDir } = context;
+  const page = await app.firstWindow();
+  await startApp(page, app);
+  const end = async (how: 'quit' | 'kill'): Promise<void> => {
+    if (how === 'kill') return crash(app);
+    await killAllAgents(page);
+    await app.close();
+  };
+  return {
+    app,
+    page,
+    statePath,
+    close: async () => {
+      try {
+        await end('quit');
+      } finally {
+        removeDir();
+      }
+    },
+    restart: async (how, between) => {
+      await end(how);
+      between?.();
+      const next = await launchElectron(env);
+      try {
+        return await runHandle({ ...context, app: next });
+      } catch (error) {
+        await next.close();
+        throw error;
+      }
+    },
+  };
 };
 
 /**

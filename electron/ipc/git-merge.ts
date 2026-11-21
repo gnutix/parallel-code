@@ -8,6 +8,7 @@ import os from 'os';
 import path from 'path';
 import type { Notify } from './notify.js';
 import { KANBAN_FILE } from './kanban.js';
+import { duplicatesCards, mergeAppBoardEdits } from './kanban-board-merge.js';
 import { atomicWriteFileSync } from '../mcp/atomic.js';
 import { debug as logDebug } from '../log.js';
 import { exec, MAX_BUFFER } from './git-exec.js';
@@ -30,6 +31,7 @@ import type {
   MergeStatus,
   MergeTargetChanges,
   RemoteBranchState,
+  RemoteDivergence,
 } from './shared-types.js';
 
 const STDERR_CAP = 4096; // cap for stderr buffers in spawned git processes
@@ -157,9 +159,12 @@ const KANBAN_CLASH_WARNING =
  * Unchanged: the saved text is written back as is. Changed (the task branch
  * committed board edits): the saved edits are merged onto the new board with
  * `git merge-file`, so the branch's changes are not reverted in the working
- * copy (#337). When the edits overlap, the saved text is written back and the
- * function resolves to a warning naming the board, since the file then lacks
- * changes that are in the commit.
+ * copy (#337). When the lines overlap (the task edited the card the app
+ * moved), or merge into a board that shows a card twice (both moved it), the
+ * app's own card edits are replayed onto the new board instead.
+ * When neither works, the saved text is written back and the function
+ * resolves to a warning naming the board, since the file then lacks changes
+ * that are in the commit.
  */
 export async function setAsideKanbanEdits(
   mergeRoot: string,
@@ -178,7 +183,10 @@ export async function setAsideKanbanEdits(
     try {
       const merged = await committedBoard(mergeRoot);
       if (merged !== base) {
-        const combined = await mergeBoardText(mergeRoot, { local: saved, base, merged });
+        const local = saved.toString('utf8');
+        const lines = await mergeBoardText(mergeRoot, { local: saved, base, merged });
+        const clean = lines !== null && !duplicatesCards({ local, merged, result: lines });
+        const combined = clean ? lines : mergeAppBoardEdits({ base, local, merged });
         if (combined === null) warning = KANBAN_CLASH_WARNING;
         else text = combined;
       }
@@ -342,26 +350,89 @@ async function setAsideLocalChanges(
   };
 }
 
+/** A git read in a checkout: its trimmed output, or undefined when it fails. */
+function gitReader(cwd: string) {
+  return (args: string[]) =>
+    exec('git', args, { cwd }).then(
+      ({ stdout }) => stdout.trim(),
+      () => undefined,
+    );
+}
+
 /**
  * Where origin's copy of the checked-out branch stands. Reads the local
  * remote-tracking ref without fetching, so it costs no network; pushes from
  * the app update that ref.
  */
-async function remoteBranchState(worktreePath: string): Promise<RemoteBranchState | undefined> {
-  const read = (args: string[]) =>
-    exec('git', args, { cwd: worktreePath }).then(
-      ({ stdout }) => stdout.trim(),
-      () => undefined,
-    );
+async function remoteBranchState(
+  worktreePath: string,
+): Promise<
+  { state: RemoteBranchState; divergence?: RemoteDivergence; seenAt?: number } | undefined
+> {
+  const read = gitReader(worktreePath);
   const [origin, branch, head] = await Promise.all([
     read(['config', '--get', 'remote.origin.url']),
     read(['symbolic-ref', '--quiet', '--short', 'HEAD']),
     read(['rev-parse', 'HEAD']),
   ]);
   if (!origin || !branch || !head) return undefined;
-  const remote = await read(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
-  if (!remote) return 'unpushed';
-  return remote === head ? 'pushed' : 'differs';
+  const ref = `refs/remotes/origin/${branch}`;
+  const [remote, seenAt] = await Promise.all([
+    read(['rev-parse', '--verify', '--quiet', ref]),
+    remoteSeenAt(worktreePath, branch),
+  ]);
+  const seen = seenAt === undefined ? {} : { seenAt };
+  if (!remote) return { state: 'unpushed', ...seen };
+  if (remote === head) return { state: 'pushed', ...seen };
+  const counts = await read(['rev-list', '--left-right', '--count', `${head}...${remote}`]);
+  const [ahead, behind] = (counts ?? '').split(/\s+/).map(Number);
+  const counted = Number.isInteger(ahead) && Number.isInteger(behind);
+  return { state: 'differs', ...seen, ...(counted && { divergence: { ahead, behind } }) };
+}
+
+/**
+ * When the local copy of origin's branch was last brought up to date, in ms:
+ * the newer of its reflog (a push or a fetch that moved it) and a FETCH_HEAD
+ * that lists the branch (a fetch that brought it, even unchanged). Undefined
+ * when neither exists.
+ */
+// shortcut: reads this worktree's and the main checkout's FETCH_HEAD only, and does not
+// tell remotes apart by URL, so a no-op fetch from another worktree is missed and one
+// from another remote with the same branch counts — read every worktree's if that matters.
+async function remoteSeenAt(worktreePath: string, branch: string): Promise<number | undefined> {
+  const ref = `refs/remotes/origin/${branch}`;
+  const read = gitReader(worktreePath);
+  const [entry, ownFetch, commonDir] = await Promise.all([
+    read(['log', '-g', '-1', '--date=unix', '--format=%gd', ref]),
+    read(['rev-parse', '--git-path', 'FETCH_HEAD']),
+    read(['rev-parse', '--git-common-dir']),
+  ]);
+  const logged = Number(/@\{(\d+)\}$/.exec(entry ?? '')?.[1]) * 1_000;
+  const fetchPaths = [ownFetch, commonDir && path.join(commonDir, 'FETCH_HEAD')];
+  const fetched = await Promise.all(
+    fetchPaths.map((file) => (file ? fetchedAt(path.resolve(worktreePath, file), branch) : 0)),
+  );
+  const newest = Math.max(logged || 0, ...fetched);
+  return newest > 0 ? Math.floor(newest) : undefined;
+}
+
+/**
+ * When a FETCH_HEAD was written, if its fetch brought the branch, else 0: a
+ * fetch of another branch, or one that failed, says nothing about this one.
+ */
+async function fetchedAt(file: string, branch: string): Promise<number> {
+  try {
+    const [stat, text] = await Promise.all([
+      fs.promises.stat(file),
+      fs.promises.readFile(file, 'utf8'),
+    ]);
+    return text.includes(`\tbranch '${branch}' of `) ? stat.mtimeMs : 0;
+  } catch (error) {
+    // No fetch has run in this checkout yet.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    logDebug('git', `Could not read ${file}: ${String(error)}`);
+    return 0;
+  }
 }
 
 /**
@@ -386,7 +457,9 @@ export async function checkMergeStatus(
   const state = await remote;
   return {
     ...status,
-    ...(state && { remote: state }),
+    ...(state && { remote: state.state }),
+    ...(state?.divergence && { remote_divergence: state.divergence }),
+    ...(state?.seenAt !== undefined && { remote_seen_at: state.seenAt }),
     ...(target && { target_uncommitted: target }),
     ...(divergence && { base_upstream: divergence }),
   };

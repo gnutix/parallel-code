@@ -5,11 +5,13 @@ import { expectDefined, type MockStoreHarness } from './test-helpers';
 import { showNotification } from './notification';
 
 // Hoisted so these refs are available both in vi.mock() factories and in test bodies.
-const { mockInvoke, mockIsAgentBracketedPasteEnabled, mockSaveState } = vi.hoisted(() => ({
-  mockInvoke: vi.fn(),
-  mockIsAgentBracketedPasteEnabled: vi.fn(),
-  mockSaveState: vi.fn(),
-}));
+const { mockInvoke, mockIsAgentBracketedPasteEnabled, mockRefreshBranchFacts, mockSaveState } =
+  vi.hoisted(() => ({
+    mockInvoke: vi.fn(),
+    mockRefreshBranchFacts: vi.fn(),
+    mockIsAgentBracketedPasteEnabled: vi.fn(),
+    mockSaveState: vi.fn(),
+  }));
 const core = vi.hoisted(() => ({
   harness: undefined as
     | MockStoreHarness<{
@@ -96,6 +98,7 @@ vi.mock('./core', async () => {
 });
 
 vi.mock('./persistence', () => ({ saveState: mockSaveState }));
+vi.mock('./app-facts', () => ({ refreshBranchFacts: mockRefreshBranchFacts }));
 vi.mock('./focus', () => ({ setTaskFocusedPanel: vi.fn() }));
 vi.mock('./projects', () => ({
   getProject: vi.fn(),
@@ -192,7 +195,18 @@ import {
   forgetTask,
   runBookmarkInTask,
   spawnProgramForTask,
+  spawnShellForTask,
+  startRunInTask,
+  stopRunInTask,
+  closeShell,
 } from './tasks';
+import {
+  consumePendingRunScript,
+  forgetRunShells,
+  noteRunShellExit,
+  runShellId,
+  runState,
+} from './runs';
 import { armSpCompletion, fireSpCompletion, onTaskRenamed } from './superProductivity';
 import { updateTaskBranch } from './task-branch';
 import { getCoordinatorChildren } from './sidebar-order';
@@ -1616,6 +1630,16 @@ describe('createTask worktree setup', () => {
     expect(showNotification).not.toHaveBeenCalled();
     forgetSetupShells(['shell-fail', 'shell-ok']);
     expect(setupShellState('shell-ok')).toBeUndefined();
+  });
+
+  // node-pty on macOS and Linux reports every exit with a signal; "0" means none.
+  it('reads the PTY exit report of a clean setup run as passed', () => {
+    vi.mocked(showNotification).mockClear();
+    worktreeSetup.setPendingSetupScript('shell-pty', 'true');
+    noteSetupShellExit('shell-pty', 'Fix login', 0, '0');
+    expect(setupShellState('shell-pty')).toBe('passed');
+    expect(showNotification).not.toHaveBeenCalled();
+    forgetSetupShells(['shell-pty']);
   });
 });
 
@@ -3118,6 +3142,27 @@ describe('mergeTask / pushTask preconditions', () => {
     await expect(pushTask('task-2', channel)).rejects.toThrow('Project folder not found');
     expect(mockInvoke).not.toHaveBeenCalled();
   });
+
+  it('pushTask rereads the branch facts, so a card about origin is right at once', async () => {
+    const channel = { onmessage: undefined } as unknown as Parameters<typeof pushTask>[1];
+    mockTasks['task-1'] = {
+      agentIds: [],
+      shellAgentIds: [],
+      gitIsolation: 'worktree',
+      projectId: 'p',
+      branchName: 'task/one',
+    };
+    vi.mocked(getProjectPath).mockReturnValue('/repo');
+    mockInvoke.mockResolvedValue(undefined);
+    mockRefreshBranchFacts.mockClear();
+    await pushTask('task-1', channel);
+    expect(mockRefreshBranchFacts).toHaveBeenCalledWith('task-1');
+
+    mockRefreshBranchFacts.mockClear();
+    mockInvoke.mockRejectedValueOnce(new Error('rejected'));
+    await expect(pushTask('task-1', channel)).rejects.toThrow('rejected');
+    expect(mockRefreshBranchFacts).not.toHaveBeenCalled();
+  });
 });
 
 describe('runBookmarkInTask', () => {
@@ -3135,5 +3180,133 @@ describe('runBookmarkInTask', () => {
       expect.objectContaining({ agentId: programId }),
     );
     expect(mockTasks['task-b'].shellAgentIds).toHaveLength(2);
+  });
+});
+
+describe('run commands', () => {
+  const web = { id: 'run-web', name: 'web', command: 'npm run dev' };
+
+  beforeEach(() => {
+    mockTasks['task-r'] = { agentIds: [], shellAgentIds: [] };
+    mockInvoke.mockClear();
+    mockInvoke.mockResolvedValue(undefined);
+    vi.mocked(showNotification).mockClear();
+  });
+
+  afterEach(() => {
+    forgetRunShells(mockTasks['task-r']?.shellAgentIds ?? []);
+  });
+
+  it('starts a run in a terminal of its own that runs the command once', async () => {
+    await startRunInTask('task-r', web);
+    const [shellId] = mockTasks['task-r'].shellAgentIds;
+    expect(runShellId('task-r', 'run-web')).toBe(shellId);
+    expect(runState('task-r', 'run-web')).toBe('running');
+    expect(consumePendingRunScript(shellId)).toBe('npm run dev');
+    expect(consumePendingRunScript(shellId)).toBeUndefined();
+  });
+
+  it('restarts by closing the previous terminal, so each run keeps one log', async () => {
+    await startRunInTask('task-r', web);
+    const [first] = mockTasks['task-r'].shellAgentIds;
+    await startRunInTask('task-r', web);
+    expect(mockInvoke).toHaveBeenCalledWith(IPC.KillAgent, { agentId: first });
+    expect(mockTasks['task-r'].shellAgentIds).toHaveLength(1);
+    expect(mockTasks['task-r'].shellAgentIds[0]).not.toBe(first);
+    expect(runState('task-r', 'run-web')).toBe('running');
+  });
+
+  it('stops with Ctrl+C and reads the exit that follows as stopped, quietly', async () => {
+    await startRunInTask('task-r', web);
+    const [shellId] = mockTasks['task-r'].shellAgentIds;
+    stopRunInTask('task-r', 'run-web');
+    expect(mockInvoke).toHaveBeenCalledWith(IPC.WriteToAgent, { agentId: shellId, data: '\x03' });
+    // npm exits 1 on SIGINT; the user asked for the stop, so it is no failure.
+    noteRunShellExit(shellId, 'Fix login', 1);
+    expect(runState('task-r', 'run-web')).toBe('stopped');
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  it('focuses the new terminal on every run, not a neighbour of the closed one', async () => {
+    const panels: Record<string, string> = {};
+    Object.assign(core.harness?.store ?? {}, { focusedPanel: panels });
+    const other = spawnShellForTask('task-r');
+    await startRunInTask('task-r', web);
+    expect(panels['task-r']).toBe('shell:1');
+    await startRunInTask('task-r', web);
+    expect(mockTasks['task-r'].shellAgentIds[0]).toBe(other);
+    expect(panels['task-r']).toBe('shell:1');
+  });
+
+  it('marks a command that ends on its own as finished, quietly', async () => {
+    await startRunInTask('task-r', web);
+    noteRunShellExit(mockTasks['task-r'].shellAgentIds[0], 'Fix login', 0);
+    expect(runState('task-r', 'run-web')).toBe('finished');
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  // node-pty on macOS and Linux reports every exit with a signal; "0" means none.
+  it.each([
+    { how: 'a clean exit', exitCode: 0, signal: '0', state: 'finished' },
+    { how: 'Ctrl+C typed in the terminal', exitCode: 0, signal: '2', state: 'stopped' },
+    { how: 'an outside kill', exitCode: 0, signal: '15', state: 'stopped' },
+    { how: 'a crash', exitCode: 1, signal: '0', state: 'failed' },
+  ])('reads $how as $state from the PTY exit report', async ({ exitCode, signal, state }) => {
+    await startRunInTask('task-r', web);
+    noteRunShellExit(mockTasks['task-r'].shellAgentIds[0], 'Fix login', exitCode, signal);
+    expect(runState('task-r', 'run-web')).toBe(state);
+    if (state === 'failed') {
+      expect(showNotification).toHaveBeenCalledWith(
+        expect.stringContaining('“web” stopped unexpectedly in “Fix login” (exit 1)'),
+        expect.anything(),
+      );
+    } else {
+      expect(showNotification).not.toHaveBeenCalled();
+    }
+  });
+
+  it('treats Ctrl+C typed in the terminal as a stop and a crash as a failure', async () => {
+    await startRunInTask('task-r', web);
+    noteRunShellExit(mockTasks['task-r'].shellAgentIds[0], 'Fix login', 130);
+    expect(runState('task-r', 'run-web')).toBe('stopped');
+
+    await startRunInTask('task-r', web);
+    noteRunShellExit(mockTasks['task-r'].shellAgentIds[0], 'Fix login', 1);
+    expect(runState('task-r', 'run-web')).toBe('failed');
+    expect(showNotification).toHaveBeenCalledWith(
+      expect.stringContaining('“web” stopped unexpectedly in “Fix login” (exit 1)'),
+      expect.anything(),
+    );
+  });
+
+  it('starts one terminal when restart is pressed twice in quick succession', async () => {
+    await startRunInTask('task-r', web);
+    await Promise.all([startRunInTask('task-r', web), startRunInTask('task-r', web)]);
+    expect(mockTasks['task-r'].shellAgentIds).toHaveLength(1);
+  });
+
+  it('reads the exit of a terminal being closed as a stop, never a crash', async () => {
+    await startRunInTask('task-r', web);
+    const [shellId] = mockTasks['task-r'].shellAgentIds;
+    // On Windows a killed process reports a plain non-zero code and no signal.
+    mockInvoke.mockImplementation(async (channel) => {
+      if (channel === IPC.KillAgent) noteRunShellExit(shellId, 'Fix login', 1);
+    });
+    await closeShell('task-r', shellId);
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  it('shows no run as running after the task is collapsed', async () => {
+    mockTasks['task-r'] = { id: 'task-r', agentIds: [], shellAgentIds: [] };
+    await startRunInTask('task-r', web);
+    await collapseTask('task-r');
+    expect(runState('task-r', 'run-web')).toBeUndefined();
+  });
+
+  it('forgets the run when its terminal closes', async () => {
+    await startRunInTask('task-r', web);
+    await closeShell('task-r', mockTasks['task-r'].shellAgentIds[0]);
+    expect(runState('task-r', 'run-web')).toBeUndefined();
+    expect(mockTasks['task-r'].shellAgentIds).toEqual([]);
   });
 });

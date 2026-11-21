@@ -40,6 +40,7 @@ import { withViewTransition } from '../lib/viewTransition';
 import { handleDragReorder } from '../lib/dragReorder';
 import { computeTileOrder } from '../store/sidebar-order';
 import { displayTaskNameFromPrompt, shouldUsePromptDerivedTaskName } from '../lib/clean-task-name';
+import { taskConfidence } from '../store/confidence';
 import type { Task } from '../store/types';
 import { isLandedTaskState } from '../store/landing';
 import { laterMenuItems } from './task-later-menu';
@@ -101,10 +102,9 @@ export function TaskTitleBar(props: TaskTitleBarProps) {
   const reports = () => {
     const screens = taskScreens(props.task.id);
     return finishReports({
-      confidence: props.task.confidence,
+      confidence: taskConfidence(props.task),
       tour: props.tour,
       codeFingerprint: props.task.codeFingerprint,
-      brief: props.task.brief,
       ...(screens?.state === 'done' && {
         screens: {
           headSha: screens.headSha,

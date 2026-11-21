@@ -129,6 +129,7 @@ import {
 import {
   getTaskActivityTooltip,
   isTaskTerminalAsking,
+  isTaskTerminalBusy,
   isTaskWorking,
   markAgentBusy,
 } from './taskStatus';
@@ -309,6 +310,38 @@ describe('looksLikeQuestion', () => {
       'enter continue · esc skip',
     ].join('\n');
     expect(looksLikeQuestion(tail)).toBe(true);
+  });
+
+  it("does not join Codex's update notice and its footer into one question", () => {
+    // Codex 0.167.2 at start, drawn row by row with cursor moves; the prompt row
+    // was drawn earlier and is not repainted, so only the redrawn rows follow.
+    const frame = [
+      '\x1b[1;3H│ ✨ Update available! 0.167.2 -> 0.170.0 │',
+      '\x1b[2;3H│ See https://github.com/openai/codex for installation │',
+      '\x1b[5;3H>_ OpenAI Codex (v0.167.2)',
+      '\x1b[22;3HGPT-6-Luna default · /home/user/tmp/pc-demo…',
+      '\x1b[23;3H← for agents · ? for shortcuts     ⚠ 1 warning · f2 to view',
+    ].join('');
+    expect(looksLikeQuestion(frame)).toBe(false);
+    // A question wrapped onto the next row still counts.
+    expect(looksLikeQuestion(`${frame}\x1b[8;3HAllow writing outside the`)).toBe(false);
+    expect(looksLikeQuestion(`${frame}\x1b[8;3HAllow writing outside the\x1b[9;3Hworkspace?`)).toBe(
+      true,
+    );
+    // Codex draws a row word by word, each word with its own cursor move.
+    expect(
+      looksLikeQuestion(
+        `${frame}\x1b[8;3HAllow\x1b[8;9Hwriting outside the\x1b[9;3Hworkspace\x1b[9;13H?`,
+      ),
+    ).toBe(true);
+    // Rows a partial repaint draws apart do not join: a progress row and the footer.
+    expect(looksLikeQuestion(`${frame}\x1b[8;3HWaiting to continue\x1b[23;3H? for shortcuts`)).toBe(
+      false,
+    );
+    // A question that fits on one of those rows still counts.
+    expect(looksLikeQuestion(`${frame}\x1b[8;3HWould you like to run the following command?`)).toBe(
+      true,
+    );
   });
 
   it('detects the update menu with spaces lost in a cursor-positioned redraw', () => {
@@ -1411,6 +1444,34 @@ describe('task attention state', () => {
     expect(taskNeedsAttention('task-1')).toBe(false);
   });
 
+  it('keeps a busy terminal visible on a ready or review task without ranking it higher', () => {
+    setMockTask('task-1', { agentIds: [], shellAgentIds: ['shell-1'] });
+    mockTaskGitStatus['task-1'] = {
+      has_committed_changes: true,
+      has_uncommitted_changes: false,
+      current_branch: 'task/example',
+      refreshedAt: Date.now(),
+    };
+    expect(isTaskTerminalBusy('task-1')).toBe(false);
+
+    markAgentSpawned('shell-1');
+    expect(getTaskAttentionState('task-1')).toBe('ready');
+    expect(isTaskTerminalBusy('task-1')).toBe(true);
+
+    setMockTask('task-1', { agentIds: [], shellAgentIds: ['shell-1'], needsReview: true });
+    expect(getTaskAttentionState('task-1')).toBe('review');
+    expect(isTaskTerminalBusy('task-1')).toBe(true);
+  });
+
+  it('leaves a working agent in charge of the activity when a shell is also busy', () => {
+    setMockTask('task-1', { agentIds: ['agent-1'], shellAgentIds: ['shell-1'] });
+    setMockAgent('agent-1', { status: 'running' });
+    markAgentSpawned('agent-1');
+    markAgentSpawned('shell-1');
+    expect(getTaskAttentionState('task-1')).toBe('active');
+    expect(isTaskTerminalBusy('task-1')).toBe(false);
+  });
+
   it.each([
     { overall: 'failure', failing: 1 },
     { overall: 'failure', failing: 0 },
@@ -1975,6 +2036,67 @@ describe('hook-reported agent status', () => {
 
     expect(getTaskAttentionState('task-1')).toBe('needs_input');
     expect(getTaskOpenQuestion('task-1')?.agentId).toBe('agent-1');
+  });
+
+  it('does not revive an old terminal question when a subtask finishes off screen', () => {
+    setMockTask('task-1', { agentIds: ['agent-1'], coordinatedBy: 'parent' });
+    markAgentOutput('agent-1', new TextEncoder().encode('Continue? [Y/n]'), 'task-1');
+    expect(getTaskAttentionState('task-1')).toBe('needs_input');
+    forgetAgentOutput('agent-1');
+
+    vi.advanceTimersByTime(1);
+    hook('agent-1', 'working');
+    expect(getTaskAttentionState('task-1')).toBe('active');
+    vi.advanceTimersByTime(1);
+    hook('agent-1', 'done', 'Stop');
+
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+    expect(getTaskOpenQuestions('task-1')).toEqual([]);
+    expect(getTaskActivityTooltip('task-1')).toContain('Turn finished');
+
+    // Cursor/focus housekeeping does not make the old dialog current again.
+    vi.advanceTimersByTime(1_200);
+    markAgentOutput('agent-1', new TextEncoder().encode('\x1b[?25h'), 'task-1');
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+    expect(getTaskOpenQuestions('task-1')).toEqual([]);
+
+    // Fresh terminal evidence may still report a new, hookless question.
+    vi.advanceTimersByTime(1_200);
+    markAgentOutput('agent-1', new TextEncoder().encode('Continue? [Y/n]'), 'task-1');
+    expect(getTaskAttentionState('task-1')).toBe('needs_input');
+    expect(getTaskOpenQuestion('task-1')?.agentId).toBe('agent-1');
+  });
+
+  it('lets Stop win over an answered dialog that only lingers on screen', () => {
+    // Codex repaints only changed rows, so later output never redraws the dialog.
+    markAgentOutput('agent-1', new TextEncoder().encode('Allow this command?\r\n'), 'task-1');
+    expect(getTaskAttentionState('task-1')).toBe('needs_input');
+    vi.advanceTimersByTime(1_200);
+    markAgentOutput('agent-1', new TextEncoder().encode('Working (1s)'), 'task-1');
+    vi.advanceTimersByTime(1_200);
+    hook('agent-1', 'done', 'Stop');
+    markAgentOutput('agent-1', new TextEncoder().encode(' Ran touch'), 'task-1');
+    vi.advanceTimersByTime(1_200);
+
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+    expect(getTaskOpenQuestions('task-1')).toEqual([]);
+
+    // Drawing the question again makes it current.
+    markAgentOutput('agent-1', new TextEncoder().encode('\r\nAllow this command?'), 'task-1');
+    vi.advanceTimersByTime(1_200);
+    expect(getTaskAttentionState('task-1')).toBe('needs_input');
+  });
+
+  it('does not refresh an old question when delayed analysis runs after Stop', () => {
+    markAgentOutput('agent-1', new TextEncoder().encode('Starting...'), 'task-1');
+    vi.advanceTimersByTime(1);
+    markAgentOutput('agent-1', new TextEncoder().encode('\nContinue? [Y/n]'), 'task-1');
+    vi.advanceTimersByTime(1);
+    hook('agent-1', 'done', 'Stop');
+    vi.advanceTimersByTime(1_200);
+
+    expect(getTaskAttentionState('task-1')).toBe('idle');
+    expect(getTaskOpenQuestions('task-1')).toEqual([]);
   });
 
   it('reports a failed turn as an error until the next turn starts', () => {

@@ -1,18 +1,20 @@
 import { clearStagedNotification, setStagedNotificationUserEdited } from '../store/tasks';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
-import { createSignal, untrack } from 'solid-js';
+import { batch, createSignal, untrack } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PromptInput } from './PromptInput';
 import {
+  clearInitialPrompt,
   getAgentOutputTail,
   isPanelFocused,
   onAgentReady,
   registerAction,
   registerFocusFn,
   sendPrompt,
+  setInitialPrompt,
   setTaskFocusedPanel,
   showNotification,
   concealTaskPromptInput,
@@ -135,87 +137,6 @@ describe('PromptInput key ownership', () => {
     // This element is still built in chat mode, just never shown. Registering would let the
     // hidden textarea swallow Enter and the focus key from the composer the user can see.
     expect(promptKeys()).toEqual([]);
-  });
-});
-
-describe('PromptInput question from the brief', () => {
-  it('shows what the agent needs above where the answer is typed', () => {
-    storeMock.tasks = { 'task-1': { id: 'task-1', agentIds: ['agent-1'] } };
-    const container = document.createElement('div');
-    document.body.append(container);
-    const [needsYou, setNeedsYou] = createSignal('Keep the old route?');
-    disposers.push(
-      render(
-        () => (
-          <PromptInput taskId="task-1" taskName="Task" agentId="agent-1" needsYou={needsYou()} />
-        ),
-        container,
-      ),
-    );
-    const label = () => container.querySelector('.prompt-needs-you')?.textContent;
-    expect(label()).toBe('Needs youKeep the old route?');
-    setNeedsYou('');
-    expect(label()).toBeUndefined();
-  });
-
-  // happy-dom does no layout, so these pin the structure that keeps the line
-  // off the text: its own row before the textarea, never laid over it.
-  function mountWithQuestion(props: { reserveNeedsYou?: boolean }) {
-    storeMock.tasks = { 'task-1': { id: 'task-1', agentIds: ['agent-1'] } };
-    const container = document.createElement('div');
-    document.body.append(container);
-    const [needsYou, setNeedsYou] = createSignal('');
-    disposers.push(
-      render(
-        () => (
-          <PromptInput
-            taskId="task-1"
-            taskName="Task"
-            agentId="agent-1"
-            needsYou={needsYou()}
-            reserveNeedsYou={props.reserveNeedsYou}
-          />
-        ),
-        container,
-      ),
-    );
-    const textarea = container.querySelector<HTMLTextAreaElement>('textarea.prompt-textarea');
-    if (!textarea) throw new Error('textarea not rendered');
-    const row = () => container.querySelector<HTMLElement>('.prompt-label-row');
-    return { textarea, row, setNeedsYou };
-  }
-
-  it('puts the line in a row above the textarea, not over the text', () => {
-    const { textarea, row, setNeedsYou } = mountWithQuestion({});
-    setNeedsYou('Keep the old route?');
-    const line = row()?.querySelector<HTMLElement>('.prompt-needs-you');
-    expect(line?.textContent).toBe('Needs youKeep the old route?');
-    expect(line?.style.position).not.toBe('absolute');
-    expect(row()?.style.position).not.toBe('absolute');
-    expect(row()?.nextElementSibling).toBe(textarea);
-  });
-
-  it('keeps the row while briefs may bring a question, so the text never moves', () => {
-    const { textarea, row, setNeedsYou } = mountWithQuestion({ reserveNeedsYou: true });
-    const reserved = row();
-    expect(reserved).not.toBeNull();
-    expect(reserved?.textContent).toBe('');
-    expect(textarea.classList.contains('prompt-textarea--labelled')).toBe(true);
-
-    setNeedsYou('Keep the old route?');
-    expect(row()).toBe(reserved);
-    expect(reserved?.textContent).toBe('Needs youKeep the old route?');
-
-    setNeedsYou('');
-    expect(row()).toBe(reserved);
-    expect(reserved?.textContent).toBe('');
-    expect(textarea.classList.contains('prompt-textarea--labelled')).toBe(true);
-  });
-
-  it('gives a prompt that never gets a question its whole height', () => {
-    const { textarea, row } = mountWithQuestion({});
-    expect(row()).toBeNull();
-    expect(textarea.classList.contains('prompt-textarea--labelled')).toBe(false);
   });
 });
 
@@ -403,6 +324,87 @@ describe('PromptInput initial prompt after an app restart', () => {
     // What restartAgent(id, false) does after the resume args fail.
     setAgents('agent-1', { resumed: false, generation: 1 });
     expect(onAgentReady).toHaveBeenCalled();
+  });
+
+  // The plan handoff queues a prompt for a fresh launch; it may repeat one the
+  // previous launch already received, word for word.
+  it('sends a repeated initial prompt to a fresh launch of the agent', async () => {
+    vi.useFakeTimers();
+    try {
+      let echoed = false;
+      vi.mocked(sendPrompt).mockClear();
+      vi.mocked(sendPrompt).mockImplementation(async () => {
+        echoed = true;
+      });
+      vi.mocked(getAgentOutputTail).mockImplementation(() =>
+        echoed ? 'Claude Code\n❯ do it' : 'Claude Code\n❯ ',
+      );
+      const [agents, setAgents] = createStore({ 'agent-1': { resumed: false, generation: 0 } });
+      // eslint-disable-next-line solid/reactivity -- the component tracks reads through this store mock
+      storeMock.agents = agents;
+      storeMock.tasks = { 'task-1': { id: 'task-1', agentIds: ['agent-1'] } };
+      const [initialPrompt, setQueued] = createSignal<string | undefined>('do it');
+      const container = document.createElement('div');
+      document.body.append(container);
+      disposers.push(
+        render(
+          () => (
+            <PromptInput
+              taskId="task-1"
+              taskName="Task"
+              agentId="agent-1"
+              initialPrompt={initialPrompt()}
+            />
+          ),
+          container,
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+      setQueued(undefined); // what the real sendPrompt does once it is written
+      echoed = false;
+      batch(() => {
+        setQueued('do it');
+        setAgents('agent-1', { generation: 1 });
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sendPrompt).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.mocked(sendPrompt).mockImplementation(async () => undefined);
+      vi.mocked(getAgentOutputTail).mockImplementation(() => '');
+      vi.useRealTimers();
+    }
+  });
+
+  // Going back to the planning session mid-delivery resumes another
+  // conversation; the unconfirmed plan must not be queued again for it.
+  it('does not re-queue an unconfirmed prompt after the pane resumes another session', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(sendPrompt).mockClear();
+      vi.mocked(setInitialPrompt).mockClear();
+      vi.mocked(clearInitialPrompt).mockClear();
+      vi.mocked(getAgentOutputTail).mockImplementation(() => 'Claude Code\n❯ ');
+      const [agents, setAgents] = createStore({ 'agent-1': { resumed: false, generation: 0 } });
+      // eslint-disable-next-line solid/reactivity -- the component tracks reads through this store mock
+      storeMock.agents = agents;
+      storeMock.tasks = { 'task-1': { id: 'task-1', agentIds: ['agent-1'] } };
+      vi.mocked(sendPrompt).mockImplementation(async () => {
+        setAgents('agent-1', { resumed: true, generation: 1 });
+      });
+      mountWithInitialPrompt();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sendPrompt).toHaveBeenCalledTimes(1);
+      expect(setInitialPrompt).not.toHaveBeenCalled();
+      expect(clearInitialPrompt).toHaveBeenCalledWith('task-1');
+    } finally {
+      vi.mocked(sendPrompt).mockImplementation(async () => undefined);
+      vi.mocked(getAgentOutputTail).mockImplementation(() => '');
+      vi.useRealTimers();
+    }
   });
 
   it('clears the stored draft when the box closes during an automatic send', async () => {

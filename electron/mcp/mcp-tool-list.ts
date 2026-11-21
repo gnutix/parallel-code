@@ -6,6 +6,7 @@ import { CONFIDENCE_LIMITS } from '../shared/task-confidence.js';
 import { GITHUB_LIST_LIMITS, isGitHubAgentTaskId } from '../shared/github-list.js';
 import { PR_DRAFT_LIMITS } from '../shared/pr-draft.js';
 import { FINISH_ITEMS_LIMITS } from '../shared/finish-items.js';
+import { BRIEF_MODELS } from '../shared/task-name-model.js';
 import { TOUR_CARD_LIMITS, TOUR_FORMS, TOUR_TONES } from '../shared/understanding-limits.js';
 import { semanticNodeKinds, reasoningStatuses } from '../shared/graph.js';
 import type { ReasoningUpdate } from '../shared/reasoning-state.js';
@@ -32,6 +33,13 @@ export interface ToolDef {
 
 export const APP_TASK_INSTRUCTIONS =
   'You are running inside Parallel Code. When the user asks to create a Parallel Code task (or PC task), use this server’s create_task MCP tool. It creates a visible task in the app with its own Git worktree and agent terminal. Native sub-agent tools such as spawn_agent do not create Parallel Code tasks and must not substitute for this request. Only report a task as created after create_task succeeds and returns its taskId. If the tool is missing or rejected, explain the limitation instead of silently using a native sub-agent. Task creation requires orchestration enabled in Settings > Agents, a top-level task (worktree or direct) or project page agent, and an app-managed MCP session. After enabling tools, restart and resume the session where supported.';
+
+/**
+ * Clients such as Claude Code defer tool descriptions, so without this no agent
+ * learns to publish and the Confidence card stays empty.
+ */
+export const CONFIDENCE_INSTRUCTIONS =
+  'When you rate your confidence in your changes, or a rating or review skill returns scores, publish them with confidence_publish so the task’s Confidence card and Finish review show them.';
 
 /**
  * Without this, "list them in Parallel Code" matches the canvas guidance and the
@@ -264,6 +272,71 @@ export const CONFIDENCE_TOOLS: ToolDef[] = [
         source: { type: 'string', maxLength: confidenceCaps.source },
       },
       required: ['scores'],
+    },
+  },
+];
+
+export const CARD_TOOLS: ToolDef[] = [
+  {
+    name: 'card_list',
+    description:
+      'List the cards you can fill on your task: Confidence, and the cards the user turned on that the agent fills. Each card has slots; each slot says the value it takes. Call it before card_publish.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'card_publish',
+    description:
+      'Publish values for one card on your task, from card_list. "values" is keyed by slot id; slots you leave out are empty. The new values replace the card\'s previous ones and show as out of date once the code changes. ' +
+      "A value of the wrong shape, or far over its slot's limits, rejects the whole payload with an error naming the slot, and the card keeps its previous values; text slightly over a limit is shortened. " +
+      'Card "confidence" also takes the confidence_publish payload as "values", checked as that tool checks it; parts whose slot the user removed are dropped.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card: { type: 'string', maxLength: 40 },
+        values: { type: 'object' },
+      },
+      required: ['card', 'values'],
+    },
+  },
+  {
+    name: 'card_config_read',
+    description:
+      "Read the card definitions of the app: every card with its source, slots and switches, in display order. Also returns your task's project, the project checks a card can run, the default AI model, the changes still waiting for the user, and answers: what the user did with your waiting changes since your last read (applied, dismissed, not applied with the reason, or replaced by another task's request), each reported once. " +
+      'Cards are app settings shared by every task and project, not only yours. Call it before card_config_save or card_config_remove.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'card_config_save',
+    description:
+      'Add or change one card definition. Send the whole card as card_config_read returns it; an id no card has adds a new one. "position" moves it in the display order, counted from 0. ' +
+      `A card is {id: lower-case letters, digits and dashes; name; description; source; slots; enabled: its default in every project; projects?: {projectId: boolean} overrides; pinned?: slot ids shown in the bar below the task title; mini?: its summary in that bar; showAtFinish?; hideEmpty?: left out of the cards pane until it has values, opt in, ignored when its trigger is manual}. ` +
+      `"source" is one of {kind: "model", model: "default" | ${Object.keys(BRIEF_MODELS)
+        .map((id) => `"${id}"`)
+        .join(
+          ' | ',
+        )}, prompt, inputs: any of "task-name", "prompts", "agent-message", "diff", checkId?: a check to run first, trigger: "after-turn" | "manual" | "finish"}, ` +
+      '{kind: "agent"} (the task\'s agent fills it with card_publish), {kind: "check", checkId, mode: "exit-code" | "json", trigger: "manual" | "finish" | "after-turn"}, or {kind: "app", fact: "plan" | "diff-size" | "branch-health" | "activity" | "commits" | "remote-branch" | "ci"}. ' +
+      '"slots" is 1 to 8 of {id, type: "line" | "text" | "score" | "scores" | "stat" | "items" | "checklist" | "status", label, hint?: an instruction for the model, warnBelow?: for a score or score list, limit?: for a stat, addUp?: for items, hidden?: true to keep it out of the card body while it still fills and can be pinned}; app and exit-code check cards get their one fixed layout whatever you send. ' +
+      'The built-in card "confidence" keeps its source and cannot be removed; its name, slots, enabled, projects and pinned change. The Finish review and merge check read its slots "scores" (score list) and "findings" (items); without both a task never shows as ready to merge, and the score list\'s warnBelow can raise the merge bar of 60 but not lower it. ' +
+      'The change applies at once, and the reply holds the card as saved, with a note when that differs from what you sent. ' +
+      'Three kinds of change wait for one click from the user in the app instead, and the reply says so: one that switches on an AI card (model or agent source) where it was off or makes an agent card that is on a model card, one that gives a model card that is on another model or more inputs (a checkId counts), and one that drops slots holding values on tasks. A waiting change is applied whole, with its position, and only if the card is still as it was; sending the card again replaces it, and card_config_read lists what still waits and reports how the user answered. A restart of the app drops waiting changes. To save without waiting, send an AI card switched off and tell the user to switch it on. The trigger of a check card applies at once: "finish" and "after-turn" make the app run that project check by itself.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card: { type: 'object' },
+        position: { type: 'integer', minimum: 0 },
+      },
+      required: ['card'],
+    },
+  },
+  {
+    name: 'card_config_remove',
+    description:
+      'Remove one card definition by id, for every task and project. A card that holds values on tasks is removed only after one click from the user in the app, and the reply says so. The built-in card "confidence" cannot be removed; switch it off with card_config_save.',
+    inputSchema: {
+      type: 'object',
+      properties: { card: { type: 'string', maxLength: 40 } },
+      required: ['card'],
     },
   },
 ];
@@ -752,9 +825,10 @@ export function sessionInstructions(capabilities: SessionCapabilities): string {
 }
 
 /**
- * Server instructions, most specific first: Claude Code truncates them at 2048 characters
- * (observed in 2.1.x), so role guidance must not trail the generic app and canvas text
- * (the canvas text is also sent with chat prompts that mention a canvas).
+ * Server instructions, most specific first: Claude Code truncated them at 2048 characters
+ * (observed in 2.1.x; later versions deliver more), so role guidance must not trail the
+ * generic app and canvas text (the canvas text is also sent with chat prompts that mention
+ * a canvas). The confidence line already falls past 2048 for a top-level task with peers.
  */
 export function serverInstructions(options: {
   taskId: string;
@@ -767,7 +841,9 @@ export function serverInstructions(options: {
     ...(isGitHubAgentTaskId(taskId) ? [GITHUB_AGENT_INSTRUCTIONS] : []),
     ...(sessionCapabilities ? [sessionInstructions(sessionCapabilities)] : []),
     APP_TASK_INSTRUCTIONS,
-    ...(hasCanvasTools(taskId, coordinatorId, canvasOnly) ? [CANVAS_INSTRUCTIONS] : []),
+    ...(hasCanvasTools(taskId, coordinatorId, canvasOnly)
+      ? [CONFIDENCE_INSTRUCTIONS, CANVAS_INSTRUCTIONS]
+      : []),
   ].join('\n\n');
 }
 
@@ -788,6 +864,7 @@ export function selectTools(
     ...CANVAS_VIEW_TOOLS,
     ...TOUR_TOOLS,
     ...CONFIDENCE_TOOLS,
+    ...CARD_TOOLS,
     // A branch PR needs a task; coordinators and the GitHub page's agent have none.
     ...(taskId && !isGitHubAgentTaskId(taskId) ? PR_DRAFT_TOOLS : []),
     // Items wait for the Finish dialog; self-landing children and page agents never reach it.

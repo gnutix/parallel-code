@@ -142,8 +142,8 @@ function taskAttentionEntries(taskId: string): TaskReason[] {
   return entries;
 }
 
-/** The task shows in "Needs you". */
-export function taskNeedsYou(taskId: string): boolean {
+/** The task has at least one entry in the Needs you tray. */
+export function hasTrayEntry(taskId: string): boolean {
   return taskAttentionEntries(taskId).length > 0;
 }
 

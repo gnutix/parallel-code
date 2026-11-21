@@ -111,10 +111,15 @@ interface AgentTrackingState {
   /** Set once a trust dialog was blocked; cleared when no dialog is in the tail. */
   autoTrustBlocked?: boolean;
   lastDataAt?: number;
+  /** Last meaningful output, excluding cursor/focus housekeeping. */
+  lastContentAt?: number;
   lastIdleResetAt?: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   idleConfirmPending?: boolean;
   outputTailBuffer: string;
+  /** Output since the last question check, to tell a redrawn question from one
+   *  that only lingers in the tail because the TUI repaints changed rows only. */
+  outputSinceQuestionCheck?: string;
   decoder: TextDecoder;
   lastAnalysisAt?: number;
   pendingAnalysis?: ReturnType<typeof setTimeout>;
@@ -483,6 +488,11 @@ export function looksLikeQuestion(tail: string): boolean {
   // a menu the whole tail still decides.
   const questionLine = lines.findLast(isQuestionLine);
   if (questionLine === undefined) return false;
+  // Cursor-drawn screens collapse into one line once stripped, so a pattern
+  // could join two rows: Codex's "Update available!" and its footer's
+  // "? for shortcuts" read as one question. A real question fits on a row, or
+  // wraps onto the next one.
+  if (!rows.split('\n').some(isQuestionLine) && !wrapsOntoNextRow(analysisTail)) return false;
   const afterQuestion = visible.slice(visible.lastIndexOf(questionLine));
   const scope = SELECTION_CURSOR_LINE.test(afterQuestion) ? afterQuestion : visible;
   if (scope === afterQuestion && PROMPT_AFTER_MENU.test(afterQuestion)) return false;
@@ -514,6 +524,30 @@ export function looksLikeQuestion(tail: string): boolean {
   }
 
   return true;
+}
+
+/** True when a question starts on one screen row and ends on the row below it.
+ *  Rows come from cursor positioning, so only rows drawn as neighbours on screen
+ *  join; a partial repaint skips unchanged rows between the ones it draws. */
+function wrapsOntoNextRow(tail: string): boolean {
+  // eslint-disable-next-line no-control-regex -- CUP/HVP: ESC [ row ; col H|f
+  const parts = tail.split(/\x1b\[(\d*)(?:;\d*)?[Hf]/);
+  // split() puts each captured row number before the text drawn there; Codex
+  // draws a row word by word, so pieces drawn in a row on the same row merge.
+  const drawn: { row: number; text: string }[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    const row = Number(parts[i] || 1);
+    const text = stripAnsi(parts[i + 1] ?? '');
+    const last = drawn.at(-1);
+    if (last?.row === row) last.text += ` ${text}`;
+    else drawn.push({ row, text });
+  }
+  return drawn.some((run, i) => {
+    const next = drawn[i + 1];
+    if (next?.row !== run.row + 1) return false;
+    const end = run.text.split(/\r?\n/).at(-1) ?? '';
+    return isQuestionLine(`${end} ${next.text.split(/\r?\n/)[0] ?? ''}`);
+  });
 }
 
 function isQuestionLine(line: string): boolean {
@@ -572,8 +606,10 @@ function looksLikeTrustDialog(tail: string): boolean {
 }
 
 // --- Agent question tracking ---
-// Reactive set of agent IDs that currently have a question/dialog in their terminal.
-const [questionAgents, setQuestionAgents] = createSignal<Set<string>>(new Set());
+// When the output containing each terminal question was last observed. Keep
+// this reactive even when the question stays present: new output can establish
+// a hookless question after a hook superseded its previous terminal evidence.
+const [questionAgents, setQuestionAgents] = createSignal<ReadonlyMap<string, number>>(new Map());
 
 /** True when the agent's terminal is showing a question or confirmation dialog. */
 export function isAgentAskingQuestion(agentId: string): boolean {
@@ -594,12 +630,20 @@ const questionSinceByAgent = new Map<string, number>();
 
 function updateQuestionState(agentId: string, hasQuestion: boolean): void {
   const asking = untrack(questionAgents);
-  if (hasQuestion === asking.has(agentId)) return;
+  const state = agentStates.get(agentId);
+  const unseen = state?.outputSinceQuestionCheck ?? '';
+  if (state) state.outputSinceQuestionCheck = '';
+  // Codex repaints only changed rows, so an answered dialog stays in the tail
+  // under later output. Only output that draws the question again re-confirms
+  // it; otherwise a newer hook or program status ("done") would never win.
+  const lingers = asking.has(agentId) && !terminalAsks(agentId, unseen, state?.taskId);
+  const observedAt = (lingers ? asking.get(agentId) : state?.lastContentAt) ?? 0;
+  if (hasQuestion ? asking.get(agentId) === observedAt : !asking.has(agentId)) return;
 
-  const next = new Set(asking);
+  const next = new Map(asking);
   if (hasQuestion) {
-    next.add(agentId);
-    questionSinceByAgent.set(agentId, Date.now());
+    next.set(agentId, observedAt);
+    if (!asking.has(agentId)) questionSinceByAgent.set(agentId, Date.now());
   } else {
     next.delete(agentId);
     questionSinceByAgent.delete(agentId);
@@ -645,7 +689,10 @@ export function getTaskOpenQuestions(taskId: string): TaskOpenQuestion[] {
   return questions.sort((a, b) => b.since - a.since);
 }
 
-function agentQuestionSince(agentId: string, asking: ReadonlySet<string>): number | undefined {
+function agentQuestionSince(
+  agentId: string,
+  asking: ReadonlyMap<string, number>,
+): number | undefined {
   const agent = store.agents[agentId];
   if (agent && isAgentChat(store.tasks[agent.taskId], agentId))
     return agent.chatState?.requests.at(-1)?.since;
@@ -653,7 +700,10 @@ function agentQuestionSince(agentId: string, asking: ReadonlySet<string>): numbe
   if (hook?.state === 'waiting') return hook.since;
   if ((hook && isHookWorking(agentId, hook, activeAgents())) || !asking.has(agentId))
     return undefined;
-  // The asking set and the onset map are separate structures kept in step by
+  // A newer hook supersedes old terminal evidence, including when the terminal
+  // unmounted or its throttled analysis ran after the hook arrived.
+  if (hook && (asking.get(agentId) ?? 0) < hook.updatedAt) return undefined;
+  // The observation and onset maps are separate structures kept in step by
   // `updateQuestionState`, their sole writer. This is the one place they meet,
   // so it is the one place that has to tolerate them drifting apart.
   return questionSinceByAgent.get(agentId);
@@ -925,12 +975,17 @@ export function markAgentOutput(agentId: string, data: Uint8Array, taskId?: stri
   state.lastDataAt = now;
 
   const text = state.decoder.decode(data, { stream: true });
+  const hasContent = !!normalizeForComparison(text);
+  if (hasContent) state.lastContentAt = now;
   updateBracketedPasteMode(state, state.outputTailBuffer.slice(-16) + text);
   const combined = state.outputTailBuffer + text;
   state.outputTailBuffer =
     combined.length > TAIL_BUFFER_MAX
       ? combined.slice(combined.length - TAIL_BUFFER_MAX)
       : combined;
+  state.outputSinceQuestionCheck = ((state.outputSinceQuestionCheck ?? '') + text).slice(
+    -TAIL_BUFFER_MAX,
+  );
   if (state.taskId) {
     notePrintedPrLink(agentId, state.taskId, { tail: state.outputTailBuffer, chunk: text });
   }
@@ -963,7 +1018,7 @@ export function markAgentOutput(agentId: string, data: Uint8Array, taskId?: stri
 
   // Focus, cursor and mode updates are terminal housekeeping, not agent work.
   // Keep tracking their raw bytes above, but do not change or extend activity.
-  if (!normalizeForComparison(text)) return;
+  if (!hasContent) return;
   // The tooltip shows seconds; writing per chunk re-runs it many times a second.
   if (now - (lastOutputAt[agentId] ?? 0) >= 1_000) setLastOutputAt(agentId, now);
 
@@ -1156,13 +1211,7 @@ function hasTaskAgentError(taskId: string): boolean {
  *  however much the screen looks like one. Only once the turn has ended do the
  *  heuristics get a say — login and trust prompts arrive with no hook at all. */
 export function isAgentBlockedOnInput(agentId: string): boolean {
-  const agent = store.agents[agentId];
-  if (agent && isAgentChat(store.tasks[agent.taskId], agentId))
-    return !!agent.chatState?.requests.length;
-  const hook = getAgentHookStatus(agentId);
-  if (hook?.state === 'waiting') return true;
-  if (hook && isHookWorking(agentId, hook, activeAgents())) return false;
-  return isAgentAskingQuestion(agentId);
+  return agentQuestionSince(agentId, questionAgents()) !== undefined;
 }
 
 /** Hooks run for Claude only when its command is `claude` (main's `isClaudeCommand`). */
@@ -1272,9 +1321,22 @@ export function getTaskAttentionState(taskId: string): TaskAttentionState {
   // A plain terminal producing output is not agent work, so it reports itself
   // separately and ranks below `ready` — otherwise a dev server or watcher
   // masks a task that is actually finished for as long as it keeps printing.
+  return hasBusyShell(taskId) ? 'shell_busy' : 'idle';
+}
+
+function hasBusyShell(taskId: string): boolean {
   const active = activeAgents(); // reactive read
-  if (hasShellActivity(taskId, (id) => active.has(id))) return 'shell_busy';
-  return 'idle';
+  return hasShellActivity(taskId, (id) => active.has(id));
+}
+
+/** A plain terminal is producing output. Ready and review outrank it in the
+ *  attention state, yet a finished task can still have a dev server running,
+ *  so this reports it under them too. Questions, errors and working agents
+ *  outside review keep the say. */
+export function isTaskTerminalBusy(taskId: string): boolean {
+  const attention = getTaskAttentionState(taskId);
+  if (attention === 'shell_busy') return true;
+  return (attention === 'ready' || attention === 'review') && hasBusyShell(taskId);
 }
 
 /** Attention is an aggregate; name the pane supplying its activity evidence. */

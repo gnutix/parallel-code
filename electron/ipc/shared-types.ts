@@ -117,6 +117,15 @@ export interface VerificationRun {
   message?: string;
 }
 
+/** A check card's run: the verify run, plus what a JSON-mode check wrote. */
+export interface CardCheckResult {
+  run: VerificationRun;
+  /** The object a JSON-mode check wrote, still to be checked against the card's slots. */
+  output?: Record<string, unknown>;
+  /** Why a passed JSON-mode run gave no usable output. */
+  error?: string;
+}
+
 export interface ImportableWorktree {
   path: string;
   branch_name: string;
@@ -144,6 +153,13 @@ export interface MergeStatus {
    *  at another commit than HEAD, or at HEAD. Absent without an origin, on a
    *  detached HEAD, and from older senders. */
   remote?: RemoteBranchState;
+  /** With `remote: 'differs'`: commits only the branch has, and commits only
+   *  origin's copy has. Absent otherwise, when they could not be counted, and
+   *  from older senders. */
+  remote_divergence?: RemoteDivergence;
+  /** When the local copy of origin's branch was last fetched or pushed to,
+   *  in ms. Absent when it never was, without an origin, and from older senders. */
+  remote_seen_at?: number;
   /** The task's uncommitted files the base's newer commits changed too.
    *  Bringing the base in could not put them back cleanly. Absent when there
    *  are none and from older senders. */
@@ -177,6 +193,11 @@ export interface MergeTargetChanges {
 }
 
 export type RemoteBranchState = 'unpushed' | 'differs' | 'pushed';
+
+export interface RemoteDivergence {
+  ahead: number;
+  behind: number;
+}
 
 export interface DeleteTaskResult {
   /** Set when the project's teardown script did not pass; the worktree was removed anyway. */

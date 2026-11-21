@@ -1,8 +1,8 @@
 /**
  * The review a task gets before it is finished: what is still a risk, what the
  * agent added without being asked and how confident an independent check is.
- * Built from data the app already keeps (the confidence rating and, where one
- * exists, the brief), so nothing here reads code or calls a model. Pure helpers only.
+ * Built from data the app already keeps (the confidence rating), so nothing
+ * here reads code or calls a model. Pure helpers only.
  */
 
 import type {
@@ -11,8 +11,7 @@ import type {
   ConfidenceKeyLine,
 } from '../../electron/shared/task-confidence';
 import { countLabel } from './plural';
-import type { TaskBriefRecord } from './task-brief';
-import { LOW_CONFIDENCE_SCORE, isConfidenceOutdated, type TaskConfidence } from './task-confidence';
+import { confidenceBar, isConfidenceOutdated, type TaskConfidence } from './task-confidence';
 
 export type ReviewItemKind = 'risk' | 'extra';
 
@@ -56,6 +55,8 @@ export interface ReviewScores {
   weakest?: ReviewScore;
   /** Whether the lowest score is below the bar and should draw the eye. */
   low: boolean;
+  /** Scores below this draw the eye; see `confidenceBar`. */
+  bar: number;
   source?: string;
   /** The code changed after the rating. */
   stale: boolean;
@@ -74,7 +75,6 @@ export interface ReviewSummary {
 }
 
 export interface ReviewSummaryInput {
-  brief?: TaskBriefRecord;
   confidence?: TaskConfidence;
   dismissed?: Record<string, ReviewDismissal>;
   /** Newest diff fingerprint read, which ratings are compared against. */
@@ -123,9 +123,10 @@ function scoresOf(input: ReviewSummaryInput, confidence: TaskConfidence): Review
   return {
     all,
     ...(weakest && { weakest }),
-    low: !!weakest && weakest.score < LOW_CONFIDENCE_SCORE,
+    low: !!weakest && weakest.score < confidenceBar(confidence),
+    bar: confidenceBar(confidence),
     ...(confidence.source && { source: confidence.source }),
-    stale: isConfidenceOutdated(confidence, input.codeFingerprint, input.brief),
+    stale: isConfidenceOutdated(confidence, input.codeFingerprint),
   };
 }
 
@@ -143,7 +144,6 @@ const RISK_WORDING: Partial<Record<ConfidenceFindingKind, { source: string; ask:
 };
 
 export function buildReviewSummary(input: ReviewSummaryInput): ReviewSummary {
-  const brief = input.brief?.brief;
   const findings = input.confidence?.findings ?? [];
   const dismissed = input.dismissed;
   const risk = (entry: ReviewItem): ReviewRisk => ({
@@ -159,8 +159,7 @@ export function buildReviewSummary(input: ReviewSummaryInput): ReviewSummary {
       return [risk(finding.kind === 'unverified' ? { ...entry, unconfirmed: true } : entry)];
     }),
   ]);
-  // The reviewer reads every prompt, so its reading of the ask wins over a brief's.
-  const goal = input.confidence?.asked ?? brief?.goal;
+  const goal = input.confidence?.asked;
   const keyLine = input.confidence?.keyLine;
   return {
     ...(goal && { goal }),

@@ -713,6 +713,77 @@ describe('mind map tools', () => {
     expect(client.publishConfidence).toHaveBeenCalledTimes(1);
   });
 
+  it('publishes a card for the session task, the Confidence card included', async () => {
+    const client = {
+      publishCard: vi.fn().mockResolvedValue({ ok: true, card: 'notes' }),
+      publishConfidence: vi.fn(),
+    } as unknown as MCPClient;
+    const context = { client, taskId: 'own-task', coordinatorId: '', canvasOnly: true };
+    const notes = { card: 'notes', values: { note: 'Ready' } };
+    expect(
+      await handleMCPToolCall(context, 'card_publish', { ...notes, taskId: 'other' }),
+    ).not.toHaveProperty('isError');
+    expect(client.publishCard).toHaveBeenCalledWith('own-task', notes);
+
+    // The app checks the classic payload against the editable card; it arrives as sent.
+    const rating = {
+      card: 'confidence',
+      values: { scores: [{ label: 'C', score: 90, why: 'x' }] },
+    };
+    await handleMCPToolCall(context, 'card_publish', rating);
+    expect(client.publishCard).toHaveBeenLastCalledWith('own-task', rating);
+    expect(
+      await handleMCPToolCall(context, 'card_publish', { card: 'Notes!', values: {} }),
+    ).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('card id') }] });
+    expect(client.publishCard).toHaveBeenCalledTimes(2);
+    expect(client.publishConfidence).not.toHaveBeenCalled();
+  });
+
+  it('lets a coordinator session list and publish cards for itself', async () => {
+    const client = {
+      listCards: vi.fn().mockResolvedValue({ cards: [] }),
+      publishCard: vi.fn().mockResolvedValue({ ok: true, card: 'notes' }),
+    } as unknown as MCPClient;
+    const context = { client, taskId: '', coordinatorId: 'coord-1', canvasOnly: false };
+    expect(await handleMCPToolCall(context, 'card_list', {})).not.toHaveProperty('isError');
+    expect(client.listCards).toHaveBeenCalledWith('coord-1');
+    const notes = { card: 'notes', values: { note: 'Ready' } };
+    expect(await handleMCPToolCall(context, 'card_publish', notes)).not.toHaveProperty('isError');
+    expect(client.publishCard).toHaveBeenCalledWith('coord-1', notes);
+  });
+
+  it('reads and changes card definitions for the session task', async () => {
+    const client = {
+      readCardConfig: vi.fn().mockResolvedValue({ cards: [] }),
+      changeCardConfig: vi.fn().mockResolvedValue({ status: 'saved' }),
+    } as unknown as MCPClient;
+    const context = { client, taskId: 'own-task', coordinatorId: '', canvasOnly: true };
+    expect(await handleMCPToolCall(context, 'card_config_read', {})).not.toHaveProperty('isError');
+    expect(client.readCardConfig).toHaveBeenCalledWith('own-task');
+
+    const card = { id: 'risks', name: 'Risks' };
+    expect(
+      await handleMCPToolCall(context, 'card_config_save', { card, position: 0, taskId: 'other' }),
+    ).toMatchObject({ content: [{ text: expect.stringContaining('saved') }] });
+    expect(client.changeCardConfig).toHaveBeenCalledWith('own-task', {
+      action: 'save',
+      card,
+      position: 0,
+    });
+    await handleMCPToolCall(context, 'card_config_remove', { card: 'risks' });
+    expect(client.changeCardConfig).toHaveBeenLastCalledWith('own-task', {
+      action: 'remove',
+      card: 'risks',
+    });
+    expect(
+      await handleMCPToolCall(context, 'card_config_remove', { card: 'My Risks' }),
+    ).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('card id') }] });
+    expect(
+      await handleMCPToolCall({ ...context, taskId: '' }, 'card_config_read', {}),
+    ).toMatchObject({ isError: true });
+    expect(client.changeCardConfig).toHaveBeenCalledTimes(2);
+  });
+
   it('publishes a pull request draft only for a task session and rejects one without a title', async () => {
     const client = {
       publishPrDraft: vi.fn().mockResolvedValue({ ok: true, title: 'Fix' }),

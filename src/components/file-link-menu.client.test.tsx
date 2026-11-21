@@ -19,7 +19,7 @@ vi.mock('../lib/shell', () => ({
 vi.mock('../lib/ipc', () => ({ invoke: mocks.invoke }));
 
 import { IPC } from '../../electron/ipc/channels';
-import { fileLinkKind, fileLinkMenu, worktreeRelativePath } from './file-link-menu';
+import { fileLinkKind, fileLinkMenu, isBinaryPath, worktreeRelativePath } from './file-link-menu';
 
 const worktreePath = '/repo/wt';
 function context() {
@@ -49,6 +49,13 @@ it('sorts paths into the kinds that decide their destinations', () => {
   expect(fileLinkKind('a/shot.png')).toBe('binary');
   expect(fileLinkKind('a/build.sh')).toBe('executable');
   expect(fileLinkKind('a/main.ts')).toBe('text');
+});
+
+it('treats images, videos and other media as binary', () => {
+  for (const path of ['a/x.avif', 'a/x.M4V', 'a/x.avi', 'a/x.mkv', 'a/x.mp4', 'a/x.jpeg']) {
+    expect(isBinaryPath(path)).toBe(true);
+  }
+  expect(isBinaryPath('a/mkv.ts')).toBe(false);
 });
 
 it('resolves only paths inside the worktree', () => {
@@ -338,4 +345,22 @@ it('keeps the usual menu for files the task did not change', () => {
   );
   fileLinkMenu('/repo/wt/docs/plan.md', undefined, ctx).open?.();
   expect(ctx.openDialog).toHaveBeenCalledWith('/repo/wt/docs/plan.md');
+});
+
+it('opens a changed image, video or PDF with the default app, keeping its diff in the menu', () => {
+  const open = vi.fn();
+  const ctx = { ...context(), changes: { has: () => true, open } };
+  for (const filePath of ['/repo/wt/docs/shot.PNG', '/repo/wt/demo.mp4', '/repo/wt/spec.pdf']) {
+    const menu = fileLinkMenu(filePath, undefined, ctx);
+    expect(menu.actions.map((a) => a.label)).toEqual([
+      'Open with default app',
+      'Open in changes',
+      'Show in folder',
+      'Copy path',
+    ]);
+    expect(menu.actions[1]?.title).toBeUndefined();
+    menu.open?.();
+    expect(mocks.invoke).toHaveBeenLastCalledWith(IPC.OpenPath, { filePath });
+  }
+  expect(open).not.toHaveBeenCalled();
 });

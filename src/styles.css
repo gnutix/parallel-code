@@ -869,8 +869,10 @@ html[data-look='parallel-code'] .settings-theme-desc {
   line-height: 1.6;
 }
 
-/* Let task names and the focused workspace lead, with quieter utility controls. */
-html[data-look='parallel-code'] .icon-btn:not(.sidebar-create-btn):not(:hover):not(:focus-visible) {
+/* Let task names and the focused workspace lead, with quieter utility controls.
+   A greyed one stays as quiet under the pointer, since it does nothing there. */
+html[data-look='parallel-code']
+  .icon-btn:not(.sidebar-create-btn):is(:not(:hover), :disabled):not(:focus-visible) {
   border-color: transparent !important;
 }
 
@@ -999,7 +1001,8 @@ html[data-look='noir'] .sidebar-panel {
   gap: 20px !important;
 }
 
-html[data-look='noir'] .icon-btn:not(.sidebar-create-btn):not(:hover):not(:focus-visible) {
+html[data-look='noir']
+  .icon-btn:not(.sidebar-create-btn):is(:not(:hover), :disabled):not(:focus-visible) {
   border-color: transparent !important;
 }
 
@@ -1201,7 +1204,7 @@ html[data-look^='obsidian'] .sidebar-panel {
 }
 
 /* Quiet utility controls let the primary action and task names lead. */
-html[data-look^='obsidian'] .icon-btn:not(.sidebar-create-btn):not(:hover) {
+html[data-look^='obsidian'] .icon-btn:not(.sidebar-create-btn):is(:not(:hover), :disabled) {
   border-color: transparent !important;
 }
 
@@ -1768,9 +1771,10 @@ html[data-look^='islands-'] .task-column.focus-mode .task-branch-info-bar {
   border-bottom: none;
 }
 
+/* The cards pane is an island like the notes and files below it. */
 html[data-look^='islands-']
   .task-column.focus-mode
-  .focusable-panel:not(.shell-terminal-container) {
+  :is(.focusable-panel:not(.shell-terminal-container), .cards-pane) {
   background: var(--task-panel-bg) !important;
   border: 1px solid var(--island-border);
   border-radius: 8px !important;
@@ -1785,7 +1789,9 @@ html[data-look^='islands-']
    shape on whatever portion of the panel is visible. The focus outline lifts
    onto the cell for the same reason — drawn inside the panel it would also
    get clipped at the bottom. */
-html[data-look^='islands-'] .task-column.focus-mode .rp-cell:has(> .focusable-panel) {
+html[data-look^='islands-']
+  .task-column.focus-mode
+  .rp-cell:has(> :is(.focusable-panel, .cards-pane)) {
   border-radius: var(--radius-md);
   position: relative;
 }
@@ -2256,29 +2262,26 @@ html:not([data-look^='obsidian'], [data-look^='islands-'], [data-look='workbench
   padding: 10px 44px 10px 14px !important;
 }
 
-/* The Needs you / staged label row above the prompt textarea supplies the
-   top inset, so the text sits just under the label's rule.
-   html body outranks every look's !important padding above. */
+/* Clears the Needs you / staged label overlaid on the textarea's top edge.
+   html body outranks every look's !important padding above.
+   shortcut: the labels push the text down a line when they appear — reserve the line if that jars. */
 html body .prompt-textarea.prompt-textarea--labelled {
-  padding-top: 2px !important;
+  padding-top: 30px !important;
 }
 
-/* Start the label row where the typed text starts, which each look sets
-   through the textarea's left border and padding. The bottom gap keeps
-   scrolled text, clipped at the textarea's edge, off the rule. */
-.prompt-label-row {
-  padding: 4px 36px 2px 11px;
+/* Start the Needs you line where the typed text starts, which each look sets
+   through the textarea's left border and padding. */
+.prompt-needs-you {
+  left: 11px;
 }
 
 html:not([data-look^='obsidian'], [data-look^='islands-'], [data-look='workbench'])
-  .prompt-label-row {
-  padding-left: 14px;
+  .prompt-needs-you {
+  left: 14px;
 }
 
-/* These looks fill the textarea; the row above it continues that surface. */
-html:is([data-look^='islands-'], [data-look='workbench']) .prompt-label-row {
-  padding-left: 8px;
-  background: var(--task-panel-bg);
+html:is([data-look^='islands-'], [data-look='workbench']) .prompt-needs-you {
+  left: 8px;
 }
 
 /* The html prefix outranks the faint base placeholder further down. */
@@ -2703,6 +2706,13 @@ button {
   gap: 8px;
 }
 
+/* Cards marked for Finish: as wide as the other follow-ups, framed like the popover. */
+.finish-cards {
+  width: min(100%, 24rem);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
 .finish-followup {
   width: min(100%, 24rem);
   min-width: 0;
@@ -2859,6 +2869,19 @@ textarea::placeholder {
   font-weight: 600;
 }
 
+/* With many tasks, rows that are not the user's move (working, idle) step back
+   so the ones that need a decision read first. Only the name dims: the status
+   glyph still shows work in progress. Hover, selection and focus restore it. */
+.task-item[data-quiet='true']:not(
+    :hover,
+    :focus-visible,
+    [aria-current='true'],
+    [data-kbd-focused='true']
+  )
+  .task-item-name {
+  color: var(--fg-subtle);
+}
+
 /* Title line of a task row: glyph, name, badges. A wrapped two-line name must
    not drag the glyph to the middle of the block, so everything beside the name
    is pinned to the first line. */
@@ -2874,33 +2897,6 @@ textarea::placeholder {
 .task-item-head > .status-glyph,
 .task-item-head > svg {
   height: 1.35em;
-}
-
-/* The brief line is routine: it shows its fill and chevron only when hovered or
-   open. The chevron fades rather than appearing, so the text never shifts. */
-.task-brief-bar {
-  background: transparent;
-}
-.task-brief-bar:hover,
-.task-brief-bar[aria-expanded='true'] {
-  background: var(--bg-elevated);
-}
-/* Tinted only when the agent waits on the user; hover still darkens it. */
-.task-brief-bar[data-urgent] {
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-}
-.task-brief-bar[data-urgent]:hover,
-.task-brief-bar[data-urgent][aria-expanded='true'] {
-  background: color-mix(in srgb, var(--warning) 16%, transparent);
-}
-.task-brief-chevron {
-  opacity: 0;
-  transition: opacity var(--motion-fast) var(--ease-out);
-}
-.task-brief-bar:hover .task-brief-chevron,
-.task-brief-bar:focus-visible .task-brief-chevron,
-.task-brief-bar[aria-expanded='true'] .task-brief-chevron {
-  opacity: 1;
 }
 
 /* Task names wrap to two lines rather than being cut mid-word — at sidebar
@@ -3646,6 +3642,37 @@ html:is(
 .shell-toolbar-button:hover {
   background: var(--bg-hover) !important;
   color: var(--fg) !important;
+}
+
+.shell-bookmark-button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Keep its space and keyboard access; touch devices have no hover to reveal it. */
+@media (hover: hover) {
+  .shell-bookmark-button {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .shell-toolbar-panel:is(:hover, :focus-within) .shell-bookmark-button,
+  .shell-bookmark-button[aria-expanded='true'] {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* A setting, not a launcher: no outline, unlike the toolbar's terminal buttons.
@@ -6521,7 +6548,6 @@ button.tour-save-state:not(:disabled):hover {
 
 /* Keep reduced-motion overrides last so class-based rules win by source order. */
 @media (prefers-reduced-motion: reduce) {
-  .task-brief-chevron,
   .projects-collapser {
     transition: none;
   }

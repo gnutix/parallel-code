@@ -26,7 +26,7 @@ import {
   setReviewDismissReason,
   stageRework,
 } from '../store/review';
-import { refreshCodeFingerprint } from '../store/task-brief';
+import { refreshCodeFingerprint } from '../store/task-diff';
 import { getProject } from '../store/projects';
 import { cancelReview, startReview } from '../store/review-run';
 import {
@@ -35,6 +35,7 @@ import {
   takeUnseenReview,
   taskReviewModel,
 } from '../store/task-review';
+import { taskConfidence } from '../store/confidence';
 import type { Task } from '../store/types';
 import { CheckIcon, CloseIcon, PlusIcon, ReviewIcon } from './icons';
 import { createHeightTransition } from './understanding/create-height-transition';
@@ -158,8 +159,8 @@ function Folded(props: { ids: string[]; children: (id: string) => JSX.Element })
 /**
  * The review half of finishing a task, one follow-up box until asked for.
  * Run review asks a separate reviewer model for a confidence rating; the result lists what is
- * still a risk and what was done without being asked, built from the brief's
- * goal and the rating. Items can be collected into one rework prompt, which is
+ * still a risk and what was done without being asked, built from the
+ * rating. Items can be collected into one rework prompt, which is
  * staged in the task input for the user to send. Opening the dialog sends
  * nothing.
  */
@@ -175,8 +176,7 @@ export function ReviewSection(props: {
   const bodyId = createUniqueId();
   const summary = createMemo(() =>
     buildReviewSummary({
-      brief: props.task.brief,
-      confidence: props.task.confidence,
+      confidence: taskConfidence(props.task),
       dismissed: props.task.reviewDismissed,
       codeFingerprint: props.task.codeFingerprint,
     }),
@@ -189,7 +189,7 @@ export function ReviewSection(props: {
   });
   const risk = (id: string) => byId().get(id) as ReviewRisk | undefined;
 
-  const hasResult = () => !!props.task.confidence;
+  const hasResult = () => !!taskConfidence(props.task);
   const running = () => props.task.reviewStatus?.state === 'running';
   const failure = () => {
     const status = props.task.reviewStatus;
@@ -232,8 +232,8 @@ export function ReviewSection(props: {
   const [showDismissed, setShowDismissed] = createSignal(false);
 
   onMount(() => {
-    // A rating is judged against the code as it is now, not as the last brief saw it.
-    if (props.task.confidence)
+    // A rating is judged against the code as it is now, not as the last turn left it.
+    if (taskConfidence(props.task))
       refreshCodeFingerprint(props.task.id).catch((error: unknown) =>
         logWarn('review', 'Reading the code failed', { error: errMessage(error) }),
       );
@@ -275,7 +275,7 @@ export function ReviewSection(props: {
     if (pickedChecks() === undefined) setPicking(true);
     else startReview(props.task.id);
   };
-  const rateLabel = () => (props.task.confidence ? 'Run review again' : 'Run review');
+  const rateLabel = () => (taskConfidence(props.task) ? 'Run review again' : 'Run review');
 
   const stage = () => {
     if (stageRework(props.task.id, pickedItems())) {
@@ -550,7 +550,7 @@ export function ReviewSection(props: {
               </button>
             </Show>
           </div>
-          <Show when={props.task.confidence && failure()}>
+          <Show when={taskConfidence(props.task) && failure()}>
             {(message) => (
               <p style={{ margin: '0', 'font-size': sf(12), color: theme.fgSubtle }}>
                 The last review failed, so these scores are older: {message()}
@@ -618,7 +618,7 @@ export function ReviewSection(props: {
             </button>
           </Show>
         </div>
-        <Show when={!props.task.confidence && failure()}>
+        <Show when={!taskConfidence(props.task) && failure()}>
           {(message) => (
             <p
               role="alert"

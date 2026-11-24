@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import { Notification, type BrowserWindow } from 'electron';
 import { stat } from 'fs/promises';
 import { IPC } from './channels.js';
-import { parseMergeable, parsePrRef } from '../github/gh.js';
+import { isGhNoGitHubRemoteError, parseMergeable, parsePrRef } from '../github/gh.js';
 import type {
   PrCheckBucket,
   PrCheckRun,
@@ -681,7 +681,7 @@ async function listPrRecordsForHead(
     maxBuffer: GH_MAX_BUFFER,
   });
   if (!remotes.trim()) return [];
-  const { stdout } = await exec(
+  const listed = await exec(
     'gh',
     [
       'pr',
@@ -696,7 +696,13 @@ async function listPrRecordsForHead(
       '20',
     ],
     { cwd: worktreePath, timeout: GH_TIMEOUT_MS, maxBuffer: GH_MAX_BUFFER },
-  );
+  ).catch((err: unknown) => {
+    // Answered, not failed: Finish waits on this before offering a local merge.
+    if (isGhNoGitHubRemoteError(err)) return null;
+    throw err;
+  });
+  if (!listed) return [];
+  const { stdout } = listed;
   const parsed: unknown = JSON.parse(stdout);
   if (!Array.isArray(parsed)) return [];
   const owners = remoteOwners(remotes);

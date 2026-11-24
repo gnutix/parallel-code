@@ -1,7 +1,8 @@
 # Fork only: keeps this fork's `main` (upstream's `main` plus our fixes, each
 # also sent upstream as a pull request) merged with johannesjo/parallel-code.
 # A clean merge is pushed; a conflict pushes nothing and opens an issue (or
-# updates the open one) that lists the conflicting files. The nixy flake
+# updates the open one) that lists the conflicting files, assigned to and
+# mentioning the fork's owner so that GitHub emails them. The nixy flake
 # builds Parallel Code from this branch and moves its pin daily.
 name: Sync upstream
 
@@ -76,7 +77,9 @@ jobs:
           fi
 
       # The issue is the only trace a failed sync leaves: a scheduled run's red
-      # cross reaches nobody.
+      # cross reaches nobody. The owner does not watch the fork, so a new issue
+      # alone would not reach them either: assigning it and mentioning them
+      # makes it a "participating" notification, which GitHub emails.
       - name: Report a sync that needs a hand
         if: steps.merge.outputs.result == 'conflict' || steps.push.outputs.result == 'refused'
         env:
@@ -86,7 +89,7 @@ jobs:
         run: |
           body="$RUNNER_TEMP/body.md"
           {
-            echo "Upstream \`main\` at ${UPSTREAM_SHA:0:8} could not be merged into \`main\` ([run]($RUN_URL)); nothing was pushed."
+            echo "@$GITHUB_REPOSITORY_OWNER: upstream \`main\` at ${UPSTREAM_SHA:0:8} could not be merged into \`main\` ([run]($RUN_URL)); nothing was pushed."
             echo
             if [ -s "$RUNNER_TEMP/conflicts.txt" ]; then
               echo 'Conflicting files:'
@@ -108,7 +111,7 @@ jobs:
           if [ -n "$number" ]; then
             gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$body"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body-file "$body"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body-file "$body" --assignee "$GITHUB_REPOSITORY_OWNER"
           fi
           exit 1
 

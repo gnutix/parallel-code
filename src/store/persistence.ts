@@ -12,6 +12,7 @@ import { restoreReviewChecks } from '../lib/review-checks';
 import { restoreRatedTaskCards } from '../lib/confidence-card';
 import { restoreTaskVisit } from '../lib/task-visit';
 import { restoreTaskFinishItems } from '../lib/finish-items';
+import { restoreTaskSuggestions } from '../../electron/shared/task-suggestion';
 import { restoreReviewDismissed } from '../lib/review-summary';
 import type { PrBabysit } from '../lib/pr-babysit';
 import { parseProjectChecks } from '../../electron/shared/check-settings';
@@ -522,6 +523,7 @@ function toPersistedTask(task: Task, agentDefs: AgentDef[], collapsed?: boolean)
     planHandoff: task.planHandoff,
     lastVisit: task.lastVisit,
     finishItems: task.finishItems,
+    taskSuggestions: task.taskSuggestions,
     reviewDismissed: task.reviewDismissed,
     reviewModel: task.reviewModel,
     landingState: task.landingState,
@@ -1473,6 +1475,7 @@ export async function loadState(): Promise<void> {
           agentPlan: restoreTaskAgentPlan(pt.agentPlan),
           planHandoff: restorePlanHandoff(pt.planHandoff),
           finishItems: restoreTaskFinishItems(pt.finishItems),
+          taskSuggestions: restoreTaskSuggestions(pt.taskSuggestions),
           reviewDismissed: restoreReviewDismissed(pt.reviewDismissed),
           reviewModel:
             pt.reviewModel === undefined ? undefined : restoreReviewModel(pt.reviewModel),
@@ -1647,6 +1650,7 @@ export async function loadState(): Promise<void> {
           agentPlan: restoreTaskAgentPlan(pt.agentPlan),
           planHandoff: restorePlanHandoff(pt.planHandoff),
           finishItems: restoreTaskFinishItems(pt.finishItems),
+          taskSuggestions: restoreTaskSuggestions(pt.taskSuggestions),
           reviewDismissed: restoreReviewDismissed(pt.reviewDismissed),
           reviewModel:
             pt.reviewModel === undefined ? undefined : restoreReviewModel(pt.reviewModel),

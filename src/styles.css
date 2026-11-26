@@ -2717,6 +2717,12 @@ button {
   border-radius: var(--radius-md);
 }
 
+/* The Bottom line opens the dialog at full width, above the merge options. */
+.finish-bottom-line {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
 .finish-followup {
   width: min(100%, 24rem);
   min-width: 0;
@@ -4719,6 +4725,28 @@ html[data-look='islands-light'] .window-title-icon {
   padding: 8px 8px 4px;
   color: var(--fg-muted);
   font-size: 11px;
+}
+
+/* Held Ctrl+Tab list. Placed and dimmed like the Cmd+K switcher, but it never
+   takes focus: the keys keep going to the shortcut handlers. */
+.task-cycle-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.task-cycle {
+  position: fixed;
+  top: 14vh;
+  left: 50%;
+  width: min(520px, calc(100vw - 32px));
+  padding: 10px;
+  transform: translateX(-50%);
+  border: 1px solid var(--island-border);
+  border-radius: var(--radius-lg);
+  background: var(--island-bg);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 
 /* Shown to teach the key, so it reads as a plain hint, not a control. */

@@ -279,6 +279,7 @@ export function FinishDialog(props: FinishDialogProps) {
   /** `asIs` merges the PR without the unpushed commits, so the task stays open for them. */
   const mergePr = async (asIs = false) => {
     const number = pr.number();
+    const mergedHead = pr.pr()?.headRefOid;
     const outcome = await pr.merge();
     if (outcome === 'failed') return;
     if (outcome === 'queued') {
@@ -288,17 +289,25 @@ export function FinishDialog(props: FinishDialogProps) {
     }
     showNotification(`Merged PR #${number}`, { tone: 'success' });
     if (!asIs && !merge.requiresSeparateClose() && closeAfterPrMerge()) {
-      const { id, worktreePath } = props.task;
+      const { id, worktreePath, branchName, baseBranch } = props.task;
       props.onClose();
       // Fetched now, not on open: a running agent may have written files since.
-      const status = await invoke<WorktreeStatus>(IPC.GetWorktreeStatus, { worktreePath }).catch(
-        (err: unknown) => {
-          console.error('Worktree status before closing failed:', err);
-          return undefined;
-        },
-      );
-      // Unsaved edits would be lost silently, so those go through the close warning.
-      if (status && !status.has_uncommitted_changes) closeTaskNow(id, 'merged');
+      const status = await invoke<WorktreeStatus>(IPC.GetWorktreeStatus, {
+        worktreePath,
+        baseBranch,
+        forTaskClose: true,
+      }).catch((err: unknown) => {
+        console.error('Worktree status before closing failed:', err);
+        return undefined;
+      });
+      // Only the clean checkout of the exact commit merged on GitHub can close silently.
+      if (
+        mergedHead &&
+        status?.current_branch === branchName &&
+        status.head_sha === mergedHead &&
+        status.has_uncommitted_changes === false
+      )
+        closeTaskNow(id, 'merged');
       else props.onCloseTask();
       return;
     }

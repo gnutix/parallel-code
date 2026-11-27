@@ -86,6 +86,7 @@ export function createMergeState(props: MergeStateProps) {
   const [worktreeStatus, { refetch: refetchWorktreeStatus, mutate: mutateWorktreeStatus }] =
     createResource(resourceSource, (src) =>
       invoke<WorktreeStatus>(IPC.GetWorktreeStatus, {
+        forTaskClose: true,
         worktreePath: src.path,
         baseBranch: src.baseBranch,
       }),
@@ -155,9 +156,8 @@ export function createMergeState(props: MergeStateProps) {
   const nothingToMerge = () => {
     const status = worktreeStatus();
     return (
-      !!status &&
-      !status.has_committed_changes &&
-      !status.has_uncommitted_changes &&
+      status?.has_commits_ahead === false &&
+      status.has_uncommitted_changes === false &&
       !hasBranchMismatch()
     );
   };
@@ -217,7 +217,12 @@ export function createMergeState(props: MergeStateProps) {
     if (!worktreeStatus()) return 'Checking the branch…';
     if (hasBranchMismatch()) return "The worktree is not on this task's branch.";
     // A branch with no work at all is nothingToMerge, which offers Close task instead.
-    if (!hasCommittedChangesToMerge()) return 'Commit the changes to merge them.';
+    if (!hasCommittedChangesToMerge()) {
+      if (worktreeStatus()?.has_commits_ahead) return 'Review the branch history before merging.';
+      return worktreeStatus()?.has_uncommitted_changes
+        ? 'Commit the changes to merge them.'
+        : 'Could not confirm whether this branch has commits to merge.';
+    }
     if (hasConflicts()) return `Resolve the conflicts with ${baseBranchName()} first.`;
     if (targetUncommitted()?.overlap.length)
       return `Commit or stash the changes in ${baseBranchName()} that this merge touches.`;

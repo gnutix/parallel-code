@@ -66,7 +66,12 @@ vi.mock('../lib/ipc', () => ({
         { hash: 'b2', message: 'fix: tweak thing', body: 'Because reasons.' },
       ];
     if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
-    return { current_branch: 'task/parent', has_committed_changes: true, head_sha: 'local' };
+    return {
+      current_branch: 'task/parent',
+      has_committed_changes: true,
+      has_uncommitted_changes: false,
+      head_sha: 'local',
+    };
   }),
   Channel: class {
     onmessage: ((text: string) => void) | null = null;
@@ -1035,6 +1040,7 @@ describe('FinishDialog merge blocker', () => {
         current_branch: 'task/parent',
         has_committed_changes: false,
         has_uncommitted_changes: true,
+        has_commits_ahead: false,
       };
     });
     mount();
@@ -1042,6 +1048,8 @@ describe('FinishDialog merge blocker', () => {
     expect(document.querySelector('[data-testid="footer-note"]')?.textContent).toBe(
       'Commit the changes to merge them.',
     );
+    expect(confirmButton()?.textContent).not.toBe('Close task');
+    expect(confirmButton()?.disabled).toBe(true);
     // Nothing to merge yet, so no merge options either.
     expect(document.body.textContent).not.toContain('Squash commits');
   });
@@ -1096,13 +1104,18 @@ describe('FinishDialog with no work on the branch', () => {
       return {
         current_branch: 'task/parent',
         has_committed_changes: false,
+        has_commits_ahead: false,
         has_uncommitted_changes: false,
       };
     });
     const handlers = mount();
     await flush();
+    expect(invoke).toHaveBeenCalledWith(
+      IPC.GetWorktreeStatus,
+      expect.objectContaining({ forTaskClose: true }),
+    );
     expect(document.body.textContent).toContain(
-      'Nothing on this branch: it has no commits and no uncommitted changes, so nothing is left to merge.',
+      'This branch has no commits ahead of its base and no uncommitted changes.',
     );
     expect(document.querySelector('[data-testid="target-uncommitted"]')).toBeNull();
     // The quiet notice says it all; no warning that the merge has nothing to bring in.
@@ -1121,12 +1134,37 @@ describe('FinishDialog with no work on the branch', () => {
     expect(handlers.onCloseTask).toHaveBeenCalled();
   });
 
+  it.each([
+    { ahead: true, reason: 'Review the branch history before merging.' },
+    { ahead: undefined, reason: 'Could not confirm whether this branch has commits to merge.' },
+  ])('keeps the task open when commits ahead is $ahead', async ({ ahead, reason }) => {
+    mockInvoke((channel) => {
+      if (channel === IPC.GetBranchLog) return '';
+      if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
+      return {
+        current_branch: 'task/parent',
+        has_committed_changes: false,
+        has_commits_ahead: ahead,
+        has_uncommitted_changes: false,
+      };
+    });
+    mount();
+    await flush();
+    expect(confirmButton()?.textContent).not.toBe('Close task');
+    expect(confirmButton()?.disabled).toBe(true);
+    expect(document.querySelector('[data-testid="footer-note"]')?.textContent).toContain(reason);
+  });
+
   it("does not offer to close while the worktree is off the task's branch", async () => {
     mockInvoke((channel) => {
       if (channel === IPC.GetBranchLog) return '';
       if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
       // The other branch may hold the task's work.
-      return { current_branch: 'task/other', has_committed_changes: false };
+      return {
+        current_branch: 'task/other',
+        has_commits_ahead: false,
+        has_uncommitted_changes: false,
+      };
     });
     mount();
     await flush();
@@ -1477,6 +1515,32 @@ describe('FinishDialog with an open PR', () => {
     expect(closeTaskNow).not.toHaveBeenCalled();
     expect(handlers.onCloseTask).toHaveBeenCalled();
   });
+
+  it.each([
+    { current_branch: null, head_sha: null },
+    { current_branch: 'another-branch', head_sha: 'local' },
+    { current_branch: 'task/parent', head_sha: 'new-commit' },
+  ])(
+    'asks before closing when the checkout changes during the PR merge ($head_sha, $current_branch)',
+    async (afterMerge) => {
+      mockInvoke((channel) => {
+        if (channel === IPC.GetBranchLog) return '';
+        if (channel === IPC.CheckMergeStatus) return { conflicting_files: [], main_ahead_count: 0 };
+        const checkout = vi.mocked(mergePullRequestForTask).mock.calls.length
+          ? afterMerge
+          : { current_branch: 'task/parent', head_sha: 'local' };
+        return { ...checkout, has_uncommitted_changes: false };
+      });
+      vi.mocked(getPullRequestDetails).mockResolvedValue(prDetails());
+      vi.mocked(mergePullRequestForTask).mockResolvedValueOnce(true);
+      const handlers = mount({ task: task({ prUrl: PR_URL }) });
+      await flush();
+      confirmButton()?.click();
+      await flush();
+      expect(closeTaskNow).not.toHaveBeenCalled();
+      expect(handlers.onCloseTask).toHaveBeenCalledOnce();
+    },
+  );
 
   it('asks before closing a merged task with uncommitted changes', async () => {
     mockInvoke((channel) => {
